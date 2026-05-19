@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useEffect, useEffectEvent, useState } from 'react'
 import {
   Eye,
   EyeOff,
@@ -14,16 +14,13 @@ import {
   Shield,
   ExternalLink,
   ChevronDown,
-  ChevronRight,
-  ChevronUp,
   Zap,
   Copy,
   Coffee,
   Terminal,
   Loader2,
   X,
-  BookOpen,
-  Folder,
+  Webhook,
   FolderOpen,
 } from 'lucide-react'
 
@@ -42,15 +39,97 @@ const OPENAI_MODELS = [
 ]
 
 const MINIMAX_MODELS = [
-  { value: 'MiniMax-M2.7', label: 'M2.7', description: '1M Context, Latest' },
-  { value: 'MiniMax-M2.5', label: 'M2.5', description: '204K Context' },
-  { value: 'MiniMax-M2.5-highspeed', label: 'M2.5 Highspeed', description: '204K, Fastest' },
+  { value: 'MiniMax-M2.7', label: 'MiniMax M2.7', description: '1M context' },
+  { value: 'MiniMax-M2.5', label: 'MiniMax M2.5', description: 'Balanced' },
+  { value: 'MiniMax-M2.5-highspeed', label: 'M2.5 Highspeed', description: 'Fastest' },
 ]
 
+const DEFAULT_LOCAL_MODEL = ''
+const DEFAULT_LOCAL_BASE_URL = 'http://127.0.0.1:11434/v1'
+
+type AIProvider = 'anthropic' | 'openai' | 'minimax' | 'local'
+type ApiKeySettingKey = 'anthropicApiKey' | 'openaiApiKey' | 'minimaxApiKey' | 'localApiKey'
+type ModelSettingKey = 'anthropicModel' | 'openaiModel' | 'minimaxModel'
+type LocalModelSource = 'openai-compatible' | 'runtime-active' | 'runtime-catalog'
+
+interface LocalModelOption {
+  id: string
+  label: string
+  loaded: boolean
+  source: LocalModelSource
+}
+
+interface LocalEndpoint {
+  id: string
+  name: string
+  baseUrl: string
+  model: string
+}
+
+interface LocalEndpointPreset {
+  label: string
+  name: string
+  baseUrl: string
+  model: string
+}
+
+interface LocalSettingsPayload {
+  provider?: string
+  localEndpoints?: LocalEndpoint[]
+  activeLocalEndpointId?: string
+}
 
 interface Toast {
   type: 'success' | 'error'
   message: string
+}
+
+const LOCAL_ENDPOINT_PRESETS: LocalEndpointPreset[] = [
+  {
+    label: 'Ollama',
+    name: 'Ollama',
+    baseUrl: 'http://127.0.0.1:11434/v1',
+    model: DEFAULT_LOCAL_MODEL,
+  },
+  {
+    label: 'LM Studio',
+    name: 'LM Studio',
+    baseUrl: 'http://127.0.0.1:1234/v1',
+    model: DEFAULT_LOCAL_MODEL,
+  },
+  {
+    label: 'mlx-lm',
+    name: 'mlx-lm',
+    baseUrl: 'http://127.0.0.1:8080/v1',
+    model: DEFAULT_LOCAL_MODEL,
+  },
+  {
+    label: 'mlx',
+    name: 'mlx',
+    baseUrl: 'http://127.0.0.1:8080/v1',
+    model: DEFAULT_LOCAL_MODEL,
+  },
+  {
+    label: 'llama.cpp',
+    name: 'llama.cpp',
+    baseUrl: 'http://127.0.0.1:8080/v1',
+    model: DEFAULT_LOCAL_MODEL,
+  },
+  {
+    label: 'llama-cli',
+    name: 'llama-cli',
+    baseUrl: 'http://127.0.0.1:8080/v1',
+    model: DEFAULT_LOCAL_MODEL,
+  },
+]
+
+function createLocalEndpoint(preset?: Partial<LocalEndpoint>): LocalEndpoint {
+  return {
+    id: `local-${Math.random().toString(36).slice(2, 10)}`,
+    name: preset?.name ?? 'Custom endpoint',
+    baseUrl: preset?.baseUrl ?? DEFAULT_LOCAL_BASE_URL,
+    model: preset?.model ?? DEFAULT_LOCAL_MODEL,
+  }
 }
 
 function ToastAlert({ toast }: { toast: Toast }) {
@@ -112,16 +191,22 @@ function ApiKeyField({
   fieldKey,
   hint,
   docHref,
+  docLabel = 'Get key',
   onToast,
   testProvider,
+  allowTestWithoutSavedKey = false,
+  onSaved,
 }: {
   label: string
   placeholder: string
-  fieldKey: 'anthropicApiKey' | 'openaiApiKey' | 'minimaxApiKey'
+  fieldKey: ApiKeySettingKey
   hint: string
-  docHref: string
+  docHref?: string
+  docLabel?: string
   onToast: (t: Toast) => void
   testProvider?: string
+  allowTestWithoutSavedKey?: boolean
+  onSaved?: () => void
 }) {
   const [key, setKey] = useState('')
   const [showKey, setShowKey] = useState(false)
@@ -136,7 +221,14 @@ function ApiKeyField({
     fetch('/api/settings')
       .then((r) => r.json())
       .then((d: Record<string, unknown>) => {
-        const hasKeyField = fieldKey === 'openaiApiKey' ? 'hasOpenaiKey' : fieldKey === 'minimaxApiKey' ? 'hasMinimaxKey' : 'hasAnthropicKey'
+        const hasKeyField =
+          fieldKey === 'openaiApiKey'
+            ? 'hasOpenaiKey'
+            : fieldKey === 'minimaxApiKey'
+              ? 'hasMinimaxKey'
+            : fieldKey === 'localApiKey'
+              ? 'hasLocalKey'
+              : 'hasAnthropicKey'
         const hasKey = d[hasKeyField]
         const masked = d[fieldKey] as string | null
         if (hasKey && masked) setSavedMasked(masked)
@@ -163,6 +255,7 @@ function ApiKeyField({
       }
       setSavedMasked(key.trim().slice(0, 6) + '••••••••' + key.trim().slice(-4))
       setKey('')
+      onSaved?.()
       // Auto-test after save
       if (testProvider) void handleTest()
       else onToast({ type: 'success', message: `${label} saved successfully` })
@@ -242,12 +335,12 @@ function ApiKeyField({
               {removing ? 'Removing…' : 'Remove'}
             </button>
           )}
-          {testProvider && savedMasked && testState === 'idle' && (
+          {testProvider && (savedMasked || allowTestWithoutSavedKey) && testState !== 'testing' && (
             <button
               onClick={() => void handleTest()}
               className="shrink-0 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
             >
-              Test
+              {testState === 'idle' ? 'Test' : 'Retest'}
             </button>
           )}
           {testState === 'testing' && (
@@ -296,14 +389,16 @@ function ApiKeyField({
       </div>
       <div className="flex items-center justify-between">
         <p className="text-xs text-zinc-600">{hint}</p>
-        <a
-          href={docHref}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex items-center gap-1 text-xs text-indigo-500 hover:text-indigo-400 transition-colors"
-        >
-          Get key <ExternalLink size={11} />
-        </a>
+        {docHref && (
+          <a
+            href={docHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1 text-xs text-indigo-500 hover:text-indigo-400 transition-colors"
+          >
+            {docLabel} <ExternalLink size={11} />
+          </a>
+        )}
       </div>
     </div>
   )
@@ -316,7 +411,7 @@ function ModelSelector({
   onToast,
 }: {
   models: { value: string; label: string; description: string }[]
-  settingKey: 'anthropicModel' | 'openaiModel' | 'minimaxModel'
+  settingKey: ModelSettingKey
   defaultValue: string
   onToast: (t: Toast) => void
 }) {
@@ -381,6 +476,444 @@ function ModelSelector({
         </p>
       )}
     </>
+  )
+}
+
+function localModelSourceLabel(source: LocalModelSource): string {
+  switch (source) {
+    case 'runtime-active':
+      return 'currently running on this server'
+    case 'runtime-catalog':
+      return 'reported by the server catalog'
+    default:
+      return 'reported by /v1/models'
+  }
+}
+
+function LocalEndpointsManager({ onToast }: { onToast: (t: Toast) => void }) {
+  const [endpoints, setEndpoints] = useState<LocalEndpoint[]>([])
+  const [activeEndpointId, setActiveEndpointId] = useState('')
+  const [models, setModels] = useState<LocalModelOption[]>([])
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState('')
+  const [selectedLoaded, setSelectedLoaded] = useState(false)
+  const [testingEndpointId, setTestingEndpointId] = useState('')
+  const [testError, setTestError] = useState('')
+
+  const activeEndpoint = endpoints.find((endpoint) => endpoint.id === activeEndpointId) ?? endpoints[0] ?? null
+
+  const loadEndpoints = useEffectEvent(async () => {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/settings', { cache: 'no-store' })
+      const data = await res.json() as LocalSettingsPayload
+      const nextEndpoints = Array.isArray(data.localEndpoints) && data.localEndpoints.length > 0
+        ? data.localEndpoints
+        : [createLocalEndpoint()]
+      const nextActiveEndpointId =
+        (typeof data.activeLocalEndpointId === 'string' && nextEndpoints.some((endpoint) => endpoint.id === data.activeLocalEndpointId)
+          ? data.activeLocalEndpointId
+          : nextEndpoints[0]?.id) || ''
+
+      setEndpoints(nextEndpoints)
+      setActiveEndpointId(nextActiveEndpointId)
+    } catch {
+      const fallbackEndpoint = createLocalEndpoint()
+      setEndpoints([fallbackEndpoint])
+      setActiveEndpointId(fallbackEndpoint.id)
+      onToast({ type: 'error', message: 'Failed to load local endpoints' })
+    } finally {
+      setLoading(false)
+    }
+  })
+
+  const loadModels = useEffectEvent(async (endpoint: LocalEndpoint | null, isManualRefresh = false) => {
+    if (!endpoint) return
+    if (isManualRefresh) setRefreshing(true)
+    else {
+      setModels([])
+      setSelectedLoaded(false)
+      setError('')
+    }
+
+    try {
+      const params = new URLSearchParams({
+        endpointId: endpoint.id,
+        baseUrl: endpoint.baseUrl,
+        model: endpoint.model,
+      })
+      const res = await fetch(`/api/settings/local-models?${params.toString()}`, { cache: 'no-store' })
+      const data = await res.json() as {
+        endpointId?: string
+        selectedModel?: string
+        selectedModelLoaded?: boolean
+        models?: LocalModelOption[]
+        error?: string
+      }
+
+      const nextModels = Array.isArray(data.models) ? data.models : []
+
+      setModels(nextModels)
+      setSelectedLoaded(Boolean(data.selectedModelLoaded))
+      setError(data.error ?? '')
+    } catch {
+      setModels([])
+      setSelectedLoaded(false)
+      setError('Could not reach the local model discovery endpoint')
+    } finally {
+      setRefreshing(false)
+    }
+  })
+
+  useEffect(() => {
+    void loadEndpoints()
+  }, [])
+
+  useEffect(() => {
+    const endpoint = endpoints.find((item) => item.id === activeEndpointId) ?? endpoints[0] ?? null
+    if (!endpoint) return
+    void loadModels(endpoint, false)
+  }, [activeEndpointId])
+
+  function updateEndpoint(endpointId: string, field: keyof Omit<LocalEndpoint, 'id'>, nextValue: string) {
+    setSaved(false)
+    setEndpoints((current) =>
+      current.map((endpoint) =>
+        endpoint.id === endpointId
+          ? { ...endpoint, [field]: nextValue }
+          : endpoint,
+      ),
+    )
+  }
+
+  function addEndpoint(preset?: LocalEndpointPreset) {
+    const endpoint = createLocalEndpoint(preset)
+    setEndpoints((current) => [...current, endpoint])
+    setActiveEndpointId(endpoint.id)
+    setSaved(false)
+  }
+
+  function removeEndpoint(endpointId: string) {
+    if (endpoints.length <= 1) {
+      onToast({ type: 'error', message: 'Keep at least one local endpoint configured' })
+      return
+    }
+
+    const nextEndpoints = endpoints.filter((endpoint) => endpoint.id !== endpointId)
+    setEndpoints(nextEndpoints)
+    if (endpointId === activeEndpointId) {
+      setActiveEndpointId(nextEndpoints[0]?.id ?? '')
+    }
+    setSaved(false)
+  }
+
+  async function persistEndpoints(nextEndpointsInput: LocalEndpoint[], nextActiveId: string, successMessage: string) {
+    setSaving(true)
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          localEndpoints: nextEndpointsInput,
+          activeLocalEndpointId: nextActiveId || nextEndpointsInput[0]?.id,
+        }),
+      })
+      const data = await res.json() as {
+        saved?: boolean
+        error?: string
+        localEndpoints?: LocalEndpoint[]
+        activeLocalEndpointId?: string
+      }
+
+      if (!res.ok) {
+        throw new Error(data.error ?? 'Failed to save local endpoints')
+      }
+
+      const persistedEndpoints = Array.isArray(data.localEndpoints) && data.localEndpoints.length > 0
+        ? data.localEndpoints
+        : nextEndpointsInput
+      const nextActiveEndpointId =
+        (typeof data.activeLocalEndpointId === 'string' && persistedEndpoints.some((endpoint) => endpoint.id === data.activeLocalEndpointId)
+          ? data.activeLocalEndpointId
+          : nextActiveId) || persistedEndpoints[0]?.id || ''
+
+      setEndpoints(persistedEndpoints)
+      setActiveEndpointId(nextActiveEndpointId)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+      onToast({ type: 'success', message: successMessage })
+      const nextActiveEndpoint = persistedEndpoints.find((endpoint) => endpoint.id === nextActiveEndpointId) ?? persistedEndpoints[0] ?? null
+      if (nextActiveEndpoint) {
+        void loadModels(nextActiveEndpoint, false)
+      }
+    } catch (err) {
+      onToast({ type: 'error', message: err instanceof Error ? err.message : 'Failed to save local endpoints' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleSave() {
+    await persistEndpoints(endpoints, activeEndpointId || endpoints[0]?.id || '', 'Local endpoints saved')
+  }
+
+  async function handleTestAndSave(endpoint: LocalEndpoint) {
+    setTestingEndpointId(endpoint.id)
+    setTestError('')
+    try {
+      const res = await fetch('/api/settings/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'local',
+          baseUrl: endpoint.baseUrl,
+          model: endpoint.model,
+        }),
+      })
+      const data = await res.json() as { working: boolean; error?: string; discoveredModel?: string | null; model?: string | null }
+      if (!res.ok || !data.working) {
+        throw new Error(data.error ?? 'Local endpoint test failed')
+      }
+
+      const resolvedModel = (data.discoveredModel || data.model || endpoint.model || '').trim()
+      const nextEndpoints = endpoints.map((item) =>
+        item.id === endpoint.id
+          ? { ...item, model: resolvedModel }
+          : item,
+      )
+
+      setEndpoints(nextEndpoints)
+      await persistEndpoints(
+        nextEndpoints,
+        endpoint.id,
+        `Endpoint verified and saved as "${endpoint.name || 'Local endpoint'}"`,
+      )
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Local endpoint test failed'
+      setTestError(message)
+      onToast({ type: 'error', message })
+    } finally {
+      setTestingEndpointId('')
+    }
+  }
+
+  const currentModelMissing = Boolean(activeEndpoint?.model) && !models.some((model) => model.id === activeEndpoint?.model)
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-col gap-3 rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium text-zinc-200">Named local endpoints</p>
+            <p className="text-xs text-zinc-500 mt-0.5">
+              Save a few local servers with custom names, then switch which one is active for AI work.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {saved && (
+              <span className="flex items-center gap-1 text-xs text-emerald-400 shrink-0">
+                <Check size={12} /> Saved
+              </span>
+            )}
+            <button
+              onClick={() => void handleSave()}
+              disabled={saving || endpoints.length === 0}
+              className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
+            >
+              {saving ? 'Saving…' : 'Save endpoints'}
+            </button>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          {LOCAL_ENDPOINT_PRESETS.map((preset) => (
+            <button
+              key={preset.label}
+              onClick={() => addEndpoint(preset)}
+              className="px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-900 text-xs text-zinc-300 hover:border-cyan-500/40 hover:text-cyan-300 transition-colors"
+            >
+              Add {preset.label}
+            </button>
+          ))}
+          <button
+            onClick={() => addEndpoint()}
+            className="px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-900 text-xs text-zinc-300 hover:border-cyan-500/40 hover:text-cyan-300 transition-colors"
+          >
+            Add custom
+          </button>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-zinc-500">
+          <Loader2 size={14} className="animate-spin" /> Loading local endpoints…
+        </div>
+      ) : (
+        <>
+          <div className="space-y-3">
+            {endpoints.map((endpoint, index) => {
+              const isActive = endpoint.id === activeEndpointId
+              return (
+                <div
+                  key={endpoint.id}
+                  className={`rounded-2xl border p-4 transition-colors ${
+                    isActive ? 'border-cyan-500/40 bg-cyan-500/5' : 'border-zinc-800 bg-zinc-950/30'
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          setActiveEndpointId(endpoint.id)
+                          setSaved(false)
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                          isActive
+                            ? 'bg-cyan-600 text-white'
+                            : 'bg-zinc-800 text-zinc-300 hover:text-zinc-100'
+                        }`}
+                      >
+                        {isActive ? 'Active endpoint' : 'Set active'}
+                      </button>
+                      <span className="text-xs text-zinc-500">Endpoint {index + 1}</span>
+                    </div>
+                    <button
+                      onClick={() => removeEndpoint(endpoint.id)}
+                      className="text-xs text-red-400 hover:text-red-300 transition-colors"
+                    >
+                      Remove
+                    </button>
+                  </div>
+
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-zinc-400">Display name</label>
+                      <input
+                        type="text"
+                        value={endpoint.name}
+                        onChange={(e) => updateEndpoint(endpoint.id, 'name', e.target.value)}
+                        placeholder="LM Studio on Mac mini"
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-800 border border-zinc-700 text-zinc-100 placeholder:text-zinc-500 text-sm focus:outline-none focus:border-cyan-500"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-zinc-400">Base URL</label>
+                      <input
+                        type="text"
+                        value={endpoint.baseUrl}
+                        onChange={(e) => updateEndpoint(endpoint.id, 'baseUrl', e.target.value)}
+                        placeholder={DEFAULT_LOCAL_BASE_URL}
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-800 border border-zinc-700 text-zinc-100 placeholder:text-zinc-500 text-sm focus:outline-none focus:border-cyan-500 font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-3 space-y-1.5">
+                      <label className="text-xs font-medium text-zinc-400">Model ID (optional)</label>
+                      <input
+                        type="text"
+                        value={endpoint.model}
+                        onChange={(e) => updateEndpoint(endpoint.id, 'model', e.target.value)}
+                        placeholder="Leave blank if the server uses its loaded default model"
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-800 border border-zinc-700 text-zinc-100 placeholder:text-zinc-500 text-sm focus:outline-none focus:border-cyan-500 font-mono"
+                      />
+                    </div>
+
+                  {isActive && (
+                    <div className="mt-4 space-y-3 rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-medium text-zinc-300">Discovered models</p>
+                          <p className="text-xs text-zinc-500 mt-0.5">
+                            Refresh to read `/v1/models` or compatible runtime catalogs. If this server runs one loaded model and does not expose names, leave Model ID blank and use Test & save.
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <button
+                            onClick={() => void loadModels(endpoint, true)}
+                            disabled={refreshing}
+                            className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors disabled:opacity-50"
+                          >
+                            {refreshing ? 'Refreshing…' : 'Refresh'}
+                          </button>
+                          <button
+                            onClick={() => void handleTestAndSave(endpoint)}
+                            disabled={saving || testingEndpointId === endpoint.id}
+                            className="text-xs text-emerald-400 hover:text-emerald-300 transition-colors disabled:opacity-50"
+                          >
+                            {testingEndpointId === endpoint.id ? 'Testing…' : 'Test & save'}
+                          </button>
+                        </div>
+                      </div>
+
+                      {models.length > 0 ? (
+                        <>
+                          <div className="relative">
+                            <select
+                              value={endpoint.model}
+                              onChange={(e) => updateEndpoint(endpoint.id, 'model', e.target.value)}
+                              className="w-full appearance-none pl-3 pr-8 py-2.5 rounded-xl bg-zinc-800 border border-zinc-700 text-zinc-200 text-sm focus:outline-none focus:border-cyan-500 transition-colors cursor-pointer"
+                            >
+                              {currentModelMissing && (
+                                <option value={endpoint.model}>
+                                  {endpoint.model} — saved, not currently discovered
+                                </option>
+                              )}
+                              {models.map((model) => (
+                                <option key={model.id} value={model.id}>
+                                  {model.label} — {model.loaded ? 'running' : 'available'}
+                                </option>
+                              ))}
+                            </select>
+                            <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
+                          </div>
+
+                          <p className="text-xs text-zinc-500">
+                            Selected: <span className="text-zinc-300 font-mono">{endpoint.model || 'server default (no explicit model id)'}</span>
+                            {endpoint.model && (
+                              <> · {localModelSourceLabel(models.find((model) => model.id === endpoint.model)?.source ?? 'openai-compatible')}</>
+                            )}
+                          </p>
+
+                          {!selectedLoaded && endpoint.model && (
+                            <div className="flex gap-2 p-3 rounded-xl bg-amber-500/5 border border-amber-500/20">
+                              <AlertCircle size={14} className="text-amber-400 shrink-0 mt-0.5" />
+                              <p className="text-xs text-amber-200/80 leading-relaxed">
+                                The active model is not currently advertised by this endpoint. Pick one from the discovered list before running local AI jobs.
+                              </p>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <div className="flex gap-2 p-3 rounded-xl bg-zinc-800/70 border border-zinc-700">
+                          <AlertCircle size={14} className="text-zinc-400 shrink-0 mt-0.5" />
+                          <div className="min-w-0">
+                            <p className="text-sm text-zinc-200">No models discovered yet</p>
+                            <p className="text-xs text-zinc-500 mt-1 leading-relaxed">
+                              {error || 'This server did not return models from `/v1/models` or a compatible runtime catalog. That is fine if it serves a single loaded model.'}
+                            </p>
+                          </div>
+                        </div>
+                      )}
+
+                      {testError && testingEndpointId !== endpoint.id && (
+                        <div className="flex gap-2 p-3 rounded-xl bg-red-500/5 border border-red-500/20">
+                          <AlertCircle size={14} className="text-red-400 shrink-0 mt-0.5" />
+                          <p className="text-xs text-red-200/80 leading-relaxed whitespace-pre-wrap">{testError}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </>
+      )}
+    </div>
   )
 }
 
@@ -449,12 +982,12 @@ function ClaudeCliStatusBox() {
 }
 
 function CodexCliStatusBox() {
-  const [status, setStatus] = useState<{ available: boolean; expired?: boolean; planType?: string; authMode?: string; hasCredentials?: boolean } | null>(null)
+  const [status, setStatus] = useState<{ available: boolean; expired?: boolean; planType?: string; authMode?: string } | null>(null)
 
   useEffect(() => {
     fetch('/api/settings/cli-status')
       .then((r) => r.json())
-      .then((d: { codex?: { available: boolean; expired?: boolean; planType?: string; authMode?: string; hasCredentials?: boolean } }) => setStatus(d.codex ?? { available: false }))
+      .then((d: { codex?: { available: boolean; expired?: boolean; planType?: string; authMode?: string } }) => setStatus(d.codex ?? { available: false }))
       .catch(() => setStatus({ available: false }))
   }, [])
 
@@ -464,27 +997,22 @@ function CodexCliStatusBox() {
     const tier = status.planType
       ? status.planType.charAt(0).toUpperCase() + status.planType.slice(1)
       : 'CLI'
-    const isChatGPT = status.authMode === 'chatgpt'
     return (
       <div className="flex gap-3 p-3.5 rounded-xl bg-emerald-500/5 border border-emerald-500/20 mb-5">
         <Check size={15} className="text-emerald-400 shrink-0 mt-0.5" />
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium text-emerald-300">
-            Codex CLI detected{isChatGPT ? ' (ChatGPT login)' : ' — no API key needed'}
+            Codex CLI detected — no API key needed
           </p>
           <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">
-            {isChatGPT ? (
-              <>Signed in as <span className="text-zinc-300">{tier}</span> via ChatGPT. AI features will use Codex CLI to proxy requests. An API key below will take priority if set.</>
-            ) : (
-              <>Signed in as <span className="text-zinc-300">{tier}</span> via Codex CLI. Siftly will use your credentials automatically. An API key below will take priority if set.</>
-            )}
+            Signed in as <span className="text-zinc-300">{tier}</span> via Codex CLI. Siftly will use your credentials automatically. An API key below will take priority if set.
           </p>
         </div>
       </div>
     )
   }
 
-  if (status.hasCredentials && status.expired) {
+  if (status.available && status.expired) {
     return (
       <div className="flex gap-3 p-3.5 rounded-xl bg-amber-500/5 border border-amber-500/20 mb-5">
         <AlertCircle size={15} className="text-amber-400 shrink-0 mt-0.5" />
@@ -492,20 +1020,6 @@ function CodexCliStatusBox() {
           <p className="text-sm font-medium text-amber-300">Codex CLI session expired</p>
           <p className="text-xs text-zinc-500 mt-0.5">
             Run <span className="font-mono text-zinc-300">codex</span> in your terminal to refresh, then reload this page.
-          </p>
-        </div>
-      </div>
-    )
-  }
-
-  if (status.hasCredentials && !status.available) {
-    return (
-      <div className="flex gap-3 p-3.5 rounded-xl bg-amber-500/5 border border-amber-500/20 mb-5">
-        <AlertCircle size={15} className="text-amber-400 shrink-0 mt-0.5" />
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-amber-300">Codex credentials found but CLI not available</p>
-          <p className="text-xs text-zinc-500 mt-0.5">
-            Found saved credentials but the <span className="font-mono text-zinc-300">codex</span> binary is not responding. Install or reinstall Codex CLI, or paste your OpenAI API key below.
           </p>
         </div>
       </div>
@@ -525,7 +1039,21 @@ function CodexCliStatusBox() {
   )
 }
 
-function ProviderToggle({ value, onChange }: { value: 'anthropic' | 'openai' | 'minimax'; onChange: (v: 'anthropic' | 'openai' | 'minimax') => void }) {
+function LocalProviderStatusBox() {
+  return (
+    <div className="flex gap-3 p-3.5 rounded-xl bg-cyan-500/5 border border-cyan-500/20 mb-5">
+      <Database size={15} className="text-cyan-400 shrink-0 mt-0.5" />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-cyan-300">Named local endpoints</p>
+        <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">
+          Save a few local servers with custom names, then mark one active. Works with Ollama, LM Studio, `mlx-lm`, `mlx`, `llama.cpp`, `llama-cli`, and similar OpenAI-compatible `/v1` endpoints.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function ProviderToggle({ value, onChange }: { value: AIProvider; onChange: (v: AIProvider) => void }) {
   return (
     <div className="flex items-center gap-1 p-1 rounded-xl bg-zinc-800 border border-zinc-700 mb-5">
       <button
@@ -536,7 +1064,7 @@ function ProviderToggle({ value, onChange }: { value: 'anthropic' | 'openai' | '
             : 'text-zinc-400 hover:text-zinc-200'
         }`}
       >
-        Anthropic
+        Anthropic (Claude)
       </button>
       <button
         onClick={() => onChange('openai')}
@@ -546,38 +1074,51 @@ function ProviderToggle({ value, onChange }: { value: 'anthropic' | 'openai' | '
             : 'text-zinc-400 hover:text-zinc-200'
         }`}
       >
-        OpenAI
+        OpenAI (GPT)
       </button>
       <button
         onClick={() => onChange('minimax')}
         className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
           value === 'minimax'
-            ? 'bg-orange-600 text-white shadow-sm'
+            ? 'bg-amber-600 text-white shadow-sm'
             : 'text-zinc-400 hover:text-zinc-200'
         }`}
       >
         MiniMax
+      </button>
+      <button
+        onClick={() => onChange('local')}
+        className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+          value === 'local'
+            ? 'bg-cyan-600 text-white shadow-sm'
+            : 'text-zinc-400 hover:text-zinc-200'
+        }`}
+      >
+        Local
       </button>
     </div>
   )
 }
 
 function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
-  const [provider, setProvider] = useState<'anthropic' | 'openai' | 'minimax' | null>(null)
+  const [provider, setProvider] = useState<AIProvider | null>(null)
 
   useEffect(() => {
     fetch('/api/settings')
       .then((r) => r.json())
       .then((d: { provider?: string }) => {
-        setProvider(d.provider === 'openai' ? 'openai' : d.provider === 'minimax' ? 'minimax' : 'anthropic')
+        setProvider(
+          d.provider === 'openai' || d.provider === 'minimax' || d.provider === 'local'
+            ? d.provider
+            : 'anthropic',
+        )
       })
       .catch(() => setProvider('anthropic'))
   }, [])
 
-  async function handleProviderChange(newProvider: 'anthropic' | 'openai' | 'minimax') {
+  async function handleProviderChange(newProvider: AIProvider) {
     const prev = provider
     setProvider(newProvider)
-    const labels: Record<string, string> = { anthropic: 'Anthropic', openai: 'OpenAI', minimax: 'MiniMax' }
     try {
       const res = await fetch('/api/settings', {
         method: 'POST',
@@ -585,7 +1126,15 @@ function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
         body: JSON.stringify({ provider: newProvider }),
       })
       if (!res.ok) throw new Error('Failed to save provider')
-      onToast({ type: 'success', message: `Switched to ${labels[newProvider]}` })
+      const providerLabel =
+        newProvider === 'openai'
+          ? 'OpenAI'
+          : newProvider === 'minimax'
+            ? 'MiniMax'
+            : newProvider === 'local'
+              ? 'Local'
+              : 'Anthropic'
+      onToast({ type: 'success', message: `Switched to ${providerLabel}` })
     } catch {
       setProvider(prev) // revert on failure
       onToast({ type: 'error', message: 'Failed to save provider preference' })
@@ -598,7 +1147,7 @@ function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
       <Section
         icon={Key}
         title="AI Provider"
-        description="Choose your AI provider and configure keys. CLI auth means no key needed."
+        description="Choose Anthropic, OpenAI/Codex, MiniMax, or a local OpenAI-compatible model endpoint."
       >
         <div className="flex items-center gap-2 text-sm text-zinc-500">
           <Loader2 size={14} className="animate-spin" /> Loading settings…
@@ -611,7 +1160,7 @@ function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
     <Section
       icon={Key}
       title="AI Provider"
-      description="Choose your AI provider and configure keys. CLI auth means no key needed."
+      description="Choose Anthropic, OpenAI/Codex, MiniMax, or a local OpenAI-compatible model endpoint."
     >
       <ProviderToggle value={provider} onChange={(v) => void handleProviderChange(v)} />
 
@@ -663,7 +1212,7 @@ function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
             </div>
           </div>
         </>
-      ) : (
+      ) : provider === 'minimax' ? (
         <div className="space-y-5">
           <div>
             <ApiKeyField
@@ -671,7 +1220,7 @@ function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
               placeholder="eyJ..."
               fieldKey="minimaxApiKey"
               hint="Used for AI categorization, search, and image analysis."
-              docHref="https://platform.minimaxi.com/user-center/basic-information/interface-key"
+              docHref="https://platform.minimaxi.com"
               onToast={onToast}
               testProvider="minimax"
             />
@@ -681,9 +1230,30 @@ function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
               defaultValue="MiniMax-M2.7"
               onToast={onToast}
             />
-            <p className="text-xs text-zinc-500 mt-1.5">MiniMax M2.7 supports 1M context window — great for large batch categorization</p>
+            <p className="text-xs text-zinc-500 mt-1.5">Applies to all AI operations when MiniMax is selected.</p>
           </div>
         </div>
+      ) : (
+        <>
+          <LocalProviderStatusBox />
+          <div className="space-y-5">
+            <LocalEndpointsManager onToast={onToast} />
+            <div>
+              <ApiKeyField
+                label="Local API Key (optional)"
+                placeholder="Optional"
+                fieldKey="localApiKey"
+                hint="Optional bearer token sent to whichever local endpoint is currently active."
+                onToast={onToast}
+                testProvider="local"
+                allowTestWithoutSavedKey
+              />
+              <p className="text-xs text-zinc-500 mt-1.5">
+                Applies to all AI operations and follows the active local endpoint selection above.
+              </p>
+            </div>
+          </div>
+        </>
       )}
       <p className="text-xs text-zinc-600 mt-4">Keys are stored in plaintext in your local SQLite database (<code className="font-mono">prisma/dev.db</code>). Do not expose the database file.</p>
     </Section>
@@ -717,246 +1287,299 @@ function ExportButton({
   )
 }
 
-interface ObsidianResult {
-  written: number
-  skipped: number
-  errors: Array<{ tweetId: string; error: string }>
-  indexesWritten: number
-}
-
-interface BrowseDir {
-  name: string
-  path: string
-}
-
-function FolderBrowser({ onSelect, onClose }: { onSelect: (path: string) => void; onClose: () => void }) {
-  const [current, setCurrent] = useState('')
-  const [parent, setParent] = useState<string | null>(null)
-  const [dirs, setDirs] = useState<BrowseDir[]>([])
-  const [loading, setLoading] = useState(true)
-
-  const browse = useCallback(async (dirPath?: string) => {
-    setLoading(true)
-    try {
-      const params = dirPath ? `?path=${encodeURIComponent(dirPath)}` : ''
-      const res = await fetch(`/api/settings/browse${params}`)
-      const data = await res.json()
-      if (!res.ok) return
-      setCurrent(data.current)
-      setParent(data.parent)
-      setDirs(data.directories)
-    } catch {}
-    setLoading(false)
-  }, [])
-
-  useEffect(() => { browse() }, [browse])
-
-  return (
-    <div className="border border-zinc-700 rounded-xl bg-zinc-800/50 overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-700 bg-zinc-800">
-        <p className="text-xs font-mono text-zinc-400 truncate flex-1 mr-2">{current}</p>
-        <div className="flex items-center gap-1.5 shrink-0">
-          <button
-            onClick={() => onSelect(current)}
-            className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white transition-colors"
-          >
-            Select this folder
-          </button>
-          <button onClick={onClose} className="p-1 rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 transition-colors">
-            <X size={14} />
-          </button>
-        </div>
-      </div>
-      <div className="max-h-52 overflow-y-auto">
-        {parent && (
-          <button
-            onClick={() => browse(parent)}
-            className="flex items-center gap-2 w-full px-3 py-2 text-left text-sm text-zinc-400 hover:bg-zinc-700/50 transition-colors border-b border-zinc-800"
-          >
-            <ChevronUp size={14} className="text-zinc-500" />
-            <span>..</span>
-          </button>
-        )}
-        {loading ? (
-          <div className="flex items-center justify-center py-6">
-            <Loader2 size={16} className="text-zinc-500 animate-spin" />
-          </div>
-        ) : dirs.length === 0 ? (
-          <p className="text-xs text-zinc-600 text-center py-4">No subdirectories</p>
-        ) : (
-          dirs.map((dir) => (
-            <button
-              key={dir.path}
-              onClick={() => browse(dir.path)}
-              className="flex items-center gap-2 w-full px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-700/50 transition-colors group"
-            >
-              <Folder size={14} className="text-zinc-500 group-hover:text-indigo-400 transition-colors shrink-0" />
-              <span className="truncate">{dir.name}</span>
-              <ChevronRight size={12} className="text-zinc-600 ml-auto shrink-0" />
-            </button>
-          ))
-        )}
-      </div>
-    </div>
-  )
-}
-
-function ObsidianExportBlock({ onToast }: { onToast: (t: Toast) => void }) {
-  const [vaultPath, setVaultPath] = useState('')
-  const [savedPath, setSavedPath] = useState<string | null>(null)
-  const [savingPath, setSavingPath] = useState(false)
-  const [exporting, setExporting] = useState(false)
-  const [result, setResult] = useState<ObsidianResult | null>(null)
-  const [overwrite, setOverwrite] = useState(false)
-  const [browserOpen, setBrowserOpen] = useState(false)
+function WebhookSection({ onToast }: { onToast: (t: Toast) => void }) {
+  const [url, setUrl] = useState('')
+  const [savedUrl, setSavedUrl] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
 
   useEffect(() => {
     fetch('/api/settings')
       .then((r) => r.json())
       .then((d: Record<string, unknown>) => {
-        if (d.obsidianVaultPath) setSavedPath(d.obsidianVaultPath as string)
+        if (d.webhookUrl && typeof d.webhookUrl === 'string') setSavedUrl(d.webhookUrl)
       })
       .catch(() => {})
   }, [])
 
-  async function handleSavePath(pathToSave?: string) {
-    const finalPath = pathToSave ?? vaultPath
-    if (!finalPath.trim()) {
-      onToast({ type: 'error', message: 'Enter a vault path first' })
+  async function handleSave() {
+    if (!url.trim()) {
+      onToast({ type: 'error', message: 'Please enter a webhook URL' })
       return
     }
-    setSavingPath(true)
+    setSaving(true)
     try {
       const res = await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ obsidianVaultPath: finalPath.trim() }),
+        body: JSON.stringify({ webhookUrl: url.trim() }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'Failed to save')
-      setSavedPath(finalPath.trim())
-      setVaultPath(finalPath.trim())
-      onToast({ type: 'success', message: 'Vault path saved' })
+      if (!res.ok) throw new Error('Failed to save')
+      setSavedUrl(url.trim())
+      setUrl('')
+      onToast({ type: 'success', message: 'Webhook URL saved' })
     } catch (err) {
-      onToast({ type: 'error', message: err instanceof Error ? err.message : 'Failed to save path' })
+      onToast({ type: 'error', message: err instanceof Error ? err.message : 'Failed to save' })
     } finally {
-      setSavingPath(false)
+      setSaving(false)
     }
   }
 
-  async function handleExport() {
+  async function handleRemove() {
+    try {
+      await fetch('/api/settings', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'webhookUrl' }),
+      })
+      setSavedUrl(null)
+      onToast({ type: 'success', message: 'Webhook URL removed' })
+    } catch (err) {
+      onToast({ type: 'error', message: err instanceof Error ? err.message : 'Failed to remove' })
+    }
+  }
+
+  async function handleTest() {
+    if (!savedUrl) return
+    setTesting(true)
+    try {
+      const res = await fetch(savedUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event: 'webhook.test',
+          timestamp: new Date().toISOString(),
+          stats: { total: 0, categorized: 0, failed: 0 },
+          bookmarks: [],
+        }),
+      })
+      if (res.ok) {
+        onToast({ type: 'success', message: `Test payload sent to ${savedUrl}` })
+      } else {
+        onToast({ type: 'error', message: `Webhook returned ${res.status}` })
+      }
+    } catch (err) {
+      onToast({ type: 'error', message: err instanceof Error ? err.message : 'Failed to reach webhook' })
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  return (
+    <Section
+      icon={Webhook}
+      title="Webhook"
+      description="POST newly categorized bookmarks to an external endpoint when the AI pipeline finishes."
+    >
+      <div className="space-y-3">
+        {savedUrl ? (
+          <div className="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-emerald-500/8 border border-emerald-500/20">
+            <div className="flex items-center gap-2.5 min-w-0 overflow-hidden">
+              <Check size={15} className="text-emerald-400 shrink-0" />
+              <span className="text-sm font-mono text-zinc-300 truncate">{savedUrl}</span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => void handleTest()}
+                disabled={testing}
+                className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-50"
+              >
+                {testing ? 'Sending…' : 'Test'}
+              </button>
+              <button
+                onClick={() => void handleRemove()}
+                className="p-1.5 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                title="Remove webhook"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex gap-2.5">
+            <input
+              type="url"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void handleSave()}
+              placeholder="http://localhost:9090/hook"
+              className="flex-1 px-3.5 py-2.5 rounded-xl bg-zinc-800 border border-zinc-700 text-zinc-100 placeholder:text-zinc-500 text-sm focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/20 transition-all duration-200 font-mono"
+            />
+            <button
+              onClick={() => void handleSave()}
+              disabled={saving}
+              className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors shrink-0"
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        )}
+        <p className="text-xs text-zinc-600">
+          Receives a JSON POST with <code className="font-mono text-zinc-500">event</code>, <code className="font-mono text-zinc-500">stats</code>, and <code className="font-mono text-zinc-500">bookmarks</code> array when categorization completes.
+        </p>
+      </div>
+    </Section>
+  )
+}
+
+interface BrowseDirectory {
+  name: string
+  path: string
+}
+
+function ObsidianSection({ onToast }: { onToast: (t: Toast) => void }) {
+  const [vaultPath, setVaultPath] = useState('')
+  const [savedPath, setSavedPath] = useState<string | null>(null)
+  const [browsePath, setBrowsePath] = useState('')
+  const [directories, setDirectories] = useState<BrowseDirectory[]>([])
+  const [parentPath, setParentPath] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [browsing, setBrowsing] = useState(false)
+  const [exporting, setExporting] = useState(false)
+
+  useEffect(() => {
+    fetch('/api/settings')
+      .then((r) => r.json())
+      .then((d: Record<string, unknown>) => {
+        if (typeof d.obsidianVaultPath === 'string') {
+          setSavedPath(d.obsidianVaultPath)
+          setVaultPath(d.obsidianVaultPath)
+          setBrowsePath(d.obsidianVaultPath)
+        }
+      })
+      .catch(() => {})
+  }, [])
+
+  async function browse(path?: string) {
+    setBrowsing(true)
+    try {
+      const target = path ?? browsePath ?? vaultPath
+      const params = target ? `?path=${encodeURIComponent(target)}` : ''
+      const res = await fetch(`/api/settings/browse${params}`)
+      const data = await res.json() as {
+        current?: string
+        parent?: string | null
+        directories?: BrowseDirectory[]
+        error?: string
+      }
+      if (!res.ok) throw new Error(data.error ?? 'Could not browse folder')
+      setBrowsePath(data.current ?? target)
+      setVaultPath(data.current ?? target)
+      setParentPath(data.parent ?? null)
+      setDirectories(data.directories ?? [])
+    } catch (err) {
+      onToast({ type: 'error', message: err instanceof Error ? err.message : 'Could not browse folder' })
+    } finally {
+      setBrowsing(false)
+    }
+  }
+
+  async function savePath() {
+    setSaving(true)
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ obsidianVaultPath: vaultPath.trim() }),
+      })
+      const data = await res.json().catch(() => ({})) as { error?: string }
+      if (!res.ok) throw new Error(data.error ?? 'Failed to save vault path')
+      setSavedPath(vaultPath.trim() || null)
+      onToast({ type: 'success', message: vaultPath.trim() ? 'Obsidian vault path saved' : 'Obsidian vault path cleared' })
+    } catch (err) {
+      onToast({ type: 'error', message: err instanceof Error ? err.message : 'Failed to save vault path' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function exportVault() {
     setExporting(true)
-    setResult(null)
     try {
       const res = await fetch('/api/export/obsidian', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ overwrite }),
+        body: JSON.stringify({ overwrite: false }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'Export failed')
-      setResult(data)
-      onToast({ type: 'success', message: `Exported ${data.written} notes to Obsidian` })
+      const data = await res.json().catch(() => ({})) as { count?: number; exported?: number; skipped?: number; error?: string }
+      if (!res.ok) throw new Error(data.error ?? 'Obsidian export failed')
+      const count = data.exported ?? data.count ?? 0
+      onToast({ type: 'success', message: `Exported ${count} bookmarks to Obsidian` })
     } catch (err) {
-      onToast({ type: 'error', message: err instanceof Error ? err.message : 'Export failed' })
+      onToast({ type: 'error', message: err instanceof Error ? err.message : 'Obsidian export failed' })
     } finally {
       setExporting(false)
     }
   }
 
-  function handleBrowseSelect(selectedPath: string) {
-    setVaultPath(selectedPath)
-    setBrowserOpen(false)
-    handleSavePath(selectedPath)
-  }
-
   return (
     <Section
-      icon={BookOpen}
+      icon={FolderOpen}
       title="Obsidian Export"
-      description="Export bookmarks as Markdown notes with YAML frontmatter, wikilinks, and index files."
+      description="Export bookmarks as Markdown notes into a local Obsidian vault."
     >
-      <div className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium text-zinc-400 mb-1.5">Vault path</label>
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <FolderOpen size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
-              <input
-                type="text"
-                value={vaultPath}
-                onChange={(e) => setVaultPath(e.target.value)}
-                placeholder={savedPath ?? '/Users/you/ObsidianVault'}
-                className="w-full pl-9 pr-3 py-2.5 bg-zinc-800 border border-zinc-700 rounded-xl text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/50 font-mono"
-              />
-            </div>
-            <button
-              onClick={() => setBrowserOpen(!browserOpen)}
-              title="Browse folders"
-              className="px-3 py-2.5 rounded-xl bg-zinc-700 hover:bg-zinc-600 text-zinc-300 transition-colors"
-            >
-              <Folder size={16} />
-            </button>
-            <button
-              onClick={() => handleSavePath()}
-              disabled={savingPath || !vaultPath.trim()}
-              className="px-4 py-2.5 rounded-xl bg-zinc-700 hover:bg-zinc-600 text-sm font-medium text-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              {savingPath ? 'Saving...' : 'Save'}
-            </button>
+      <div className="space-y-3">
+        {savedPath && (
+          <div className="flex items-center gap-2.5 rounded-xl border border-emerald-500/20 bg-emerald-500/8 p-3.5 text-sm text-zinc-300">
+            <Check size={15} className="shrink-0 text-emerald-400" />
+            <span className="truncate font-mono text-xs">{savedPath}</span>
           </div>
-          {savedPath && (
-            <p className="text-xs text-zinc-500 mt-1.5">
-              Current: <code className="font-mono text-zinc-400">{savedPath}</code>
-            </p>
-          )}
-        </div>
-
-        {browserOpen && (
-          <FolderBrowser
-            onSelect={handleBrowseSelect}
-            onClose={() => setBrowserOpen(false)}
+        )}
+        <div className="flex gap-2.5">
+          <input
+            type="text"
+            value={vaultPath}
+            onChange={(e) => {
+              setVaultPath(e.target.value)
+              setBrowsePath(e.target.value)
+            }}
+            placeholder="/Users/you/Documents/Obsidian Vault"
+            className="flex-1 rounded-xl border border-zinc-700 bg-zinc-800 px-3.5 py-2.5 font-mono text-sm text-zinc-100 placeholder:text-zinc-500 transition-all duration-200 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500/20"
           />
-        )}
-
-        <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={overwrite}
-              onChange={(e) => setOverwrite(e.target.checked)}
-              className="rounded border-zinc-600 bg-zinc-800 text-indigo-500 focus:ring-indigo-500/50"
-            />
-            Overwrite existing notes
-          </label>
+          <button
+            onClick={() => void browse()}
+            disabled={browsing}
+            className="rounded-xl border border-zinc-700 bg-zinc-800 px-4 py-2.5 text-sm font-medium text-zinc-300 transition-colors hover:border-zinc-600 hover:bg-zinc-750 disabled:opacity-50"
+          >
+            {browsing ? 'Browsing...' : 'Browse'}
+          </button>
+          <button
+            onClick={() => void savePath()}
+            disabled={saving}
+            className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {saving ? 'Saving...' : 'Save'}
+          </button>
         </div>
-
-        <button
-          onClick={handleExport}
-          disabled={exporting || !savedPath}
-          className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-        >
-          {exporting ? (
-            <>
-              <Loader2 size={14} className="animate-spin" />
-              Exporting...
-            </>
-          ) : (
-            <>
-              <Download size={14} />
-              Export to Obsidian
-            </>
-          )}
-        </button>
-
-        {result && (
-          <div className="bg-zinc-800/50 border border-zinc-700 rounded-xl p-3 text-sm">
-            <p className="text-green-400">{result.written} notes written</p>
-            {result.skipped > 0 && <p className="text-zinc-400">{result.skipped} skipped (already exist)</p>}
-            {result.indexesWritten > 0 && <p className="text-zinc-400">{result.indexesWritten} index files created</p>}
-            {result.errors.length > 0 && <p className="text-red-400">{result.errors.length} errors</p>}
+        {(parentPath || directories.length > 0) && (
+          <div className="max-h-52 overflow-auto rounded-xl border border-zinc-800 bg-zinc-950/40 p-2">
+            {parentPath && (
+              <button
+                onClick={() => void browse(parentPath)}
+                className="block w-full rounded-lg px-3 py-2 text-left font-mono text-xs text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+              >
+                ../
+              </button>
+            )}
+            {directories.map((directory) => (
+              <button
+                key={directory.path}
+                onClick={() => void browse(directory.path)}
+                className="block w-full rounded-lg px-3 py-2 text-left font-mono text-xs text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+              >
+                {directory.name}/
+              </button>
+            ))}
           </div>
         )}
+        <button
+          onClick={() => void exportVault()}
+          disabled={exporting || !savedPath}
+          className="flex w-full items-center justify-center gap-2 rounded-xl border border-zinc-700 bg-zinc-800 px-4 py-3 text-sm font-medium text-zinc-200 transition-colors hover:border-zinc-600 hover:bg-zinc-750 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <Download size={14} />
+          {exporting ? 'Exporting...' : 'Export Bookmarks to Obsidian'}
+        </button>
       </div>
     </Section>
   )
@@ -1061,9 +1684,9 @@ function DangerZoneSection({ onToast }: { onToast: (t: Toast) => void }) {
 }
 
 const TECH_STACK = [
-  { label: 'Next.js 15', color: 'bg-zinc-800 text-zinc-300 border-zinc-700' },
+  { label: 'Next.js 16', color: 'bg-zinc-800 text-zinc-300 border-zinc-700' },
   { label: 'Prisma + SQLite', color: 'bg-zinc-800 text-zinc-300 border-zinc-700' },
-  { label: 'Anthropic / OpenAI / MiniMax', color: 'bg-blue-500/10 text-blue-300 border-blue-500/20' },
+  { label: 'Anthropic / OpenAI / MiniMax / Local', color: 'bg-blue-500/10 text-blue-300 border-blue-500/20' },
   { label: 'React Flow', color: 'bg-zinc-800 text-zinc-300 border-zinc-700' },
   { label: 'Tailwind CSS', color: 'bg-cyan-500/10 text-cyan-300 border-cyan-500/20' },
 ]
@@ -1313,8 +1936,9 @@ export default function SettingsPage() {
       <div className="space-y-4">
         <ApiKeySection onToast={showToast} />
         <XOAuthSection onToast={showToast} />
+        <WebhookSection onToast={showToast} />
+        <ObsidianSection onToast={showToast} />
         <DataSection />
-        <ObsidianExportBlock onToast={showToast} />
         <DangerZoneSection onToast={showToast} />
         <AboutSection />
       </div>

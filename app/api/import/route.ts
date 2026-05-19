@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
 import { parseBookmarksJson } from '@/lib/parser'
+import {
+  buildArticleImportFields,
+  extractArticleUrlsFromRawJson,
+  extractEmbeddedArticleContentFromRawJson,
+  fetchFirstArticleContent,
+} from '@/lib/article-extractor'
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   let formData: FormData
@@ -73,6 +79,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   let importedCount = 0
   let skippedCount = 0
+  let failedCount = 0
+  let firstError: string | null = null
 
   for (const bookmark of parsedBookmarks) {
     try {
@@ -86,6 +94,18 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         continue
       }
 
+      const articleUrls = Array.from(new Set([
+        bookmark.articleUrl,
+        ...bookmark.urls,
+        ...extractArticleUrlsFromRawJson(bookmark.rawJson),
+      ].filter((url): url is string => Boolean(url))))
+      const existingArticle = bookmark.articleContent
+        ? { url: bookmark.articleUrl ?? articleUrls[0] ?? '', content: bookmark.articleContent }
+        : null
+      const embeddedArticle = extractEmbeddedArticleContentFromRawJson(bookmark.rawJson)
+      const article = existingArticle ?? embeddedArticle ?? await fetchFirstArticleContent(articleUrls)
+      const articleFields = buildArticleImportFields(articleUrls, article)
+
       const created = await prisma.bookmark.create({
         data: {
           tweetId: bookmark.tweetId,
@@ -94,6 +114,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           authorName: bookmark.authorName,
           tweetCreatedAt: bookmark.tweetCreatedAt,
           rawJson: bookmark.rawJson,
+          ...articleFields,
           source,
         },
       })
@@ -112,22 +133,41 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       importedCount++
     } catch (err) {
       console.error(`Failed to import tweet ${bookmark.tweetId}:`, err)
-      skippedCount++
+      failedCount++
+      firstError ??= err instanceof Error ? err.message : String(err)
     }
   }
+
+  const processedCount = importedCount + skippedCount + failedCount
+  const errorMessage = failedCount > 0
+    ? `Failed to import ${failedCount} bookmark${failedCount === 1 ? '' : 's'}${firstError ? `: ${firstError}` : ''}`
+    : null
 
   await prisma.importJob.update({
     where: { id: importJob.id },
     data: {
-      status: 'done',
-      processedCount: importedCount,
+      status: failedCount > 0 ? 'error' : 'done',
+      processedCount,
+      errorMessage,
     },
   })
+
+  if (failedCount > 0) {
+    return NextResponse.json({
+      jobId: importJob.id,
+      imported: importedCount,
+      skipped: skippedCount,
+      failed: failedCount,
+      parsed: parsedBookmarks.length,
+      error: errorMessage,
+    }, { status: 500 })
+  }
 
   return NextResponse.json({
     jobId: importJob.id,
     imported: importedCount,
     skipped: skippedCount,
+    failed: failedCount,
     parsed: parsedBookmarks.length,
   })
 }

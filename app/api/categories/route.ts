@@ -14,9 +14,8 @@ function generateSlug(name: string): string {
 
 export async function GET(): Promise<NextResponse> {
   try {
-    // Seed defaults on first load so the nav always has categories
-    const count = await prisma.category.count()
-    if (count === 0) await seedDefaultCategories()
+    // Sync defaults on load so new built-in collections appear in existing libraries.
+    await seedDefaultCategories()
 
     const categories = await prisma.category.findMany({
       orderBy: { name: 'asc' },

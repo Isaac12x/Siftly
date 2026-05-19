@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { ExternalLink } from 'lucide-react'
 import { useMindmapSettings } from './mindmap-context'
+import { buildMediaCandidates } from '@/lib/media'
 
 interface TweetNodeData {
   tweetId: string
@@ -20,11 +21,38 @@ interface TweetNodeData {
   [key: string]: unknown
 }
 
-function proxyUrl(url: string): string {
-  return `/api/media?url=${encodeURIComponent(url)}`
-}
-
 const HANDLE_STYLE = { opacity: 0, width: 1, height: 1, minWidth: 1, minHeight: 1 }
+
+function NodeImage({
+  thumbnailUrl,
+  onFailure,
+}: {
+  thumbnailUrl: string
+  onFailure: () => void
+}) {
+  const sources = buildMediaCandidates(thumbnailUrl)
+  const [imageIndex, setImageIndex] = useState(0)
+  const imageSrc = sources[imageIndex] ?? null
+
+  if (!imageSrc) return null
+
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={imageSrc}
+      alt=""
+      style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+      loading="lazy"
+      onError={() => {
+        if (imageIndex < sources.length - 1) {
+          setImageIndex((current) => current + 1)
+          return
+        }
+        onFailure()
+      }}
+    />
+  )
+}
 
 export default function TweetNode({ data }: NodeProps) {
   const {
@@ -41,10 +69,9 @@ export default function TweetNode({ data }: NodeProps) {
 
   const isVideo = mediaType === 'video' || mediaType === 'gif'
   const color = categoryColor
+  const hasImageSource = buildMediaCandidates(thumbnailUrl).length > 0
 
-  // Proxy through our media API to avoid CORS issues with Twitter CDN
-  const proxied = thumbnailUrl ? proxyUrl(thumbnailUrl) : null
-  const showImage = proxied !== null && !imgFailed
+  const showImage = hasImageSource && !imgFailed
 
   return (
     <div className="flex flex-col items-center select-none" style={{ width: 72, gap: 0 }}>
@@ -70,13 +97,10 @@ export default function TweetNode({ data }: NodeProps) {
         }}
       >
         {showImage ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={proxied!}
-            alt=""
-            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-            loading="lazy"
-            onError={() => setImgFailed(true)}
+          <NodeImage
+            key={thumbnailUrl!}
+            thumbnailUrl={thumbnailUrl!}
+            onFailure={() => setImgFailed(true)}
           />
         ) : (
           /* Text preview bubble — shown when no image is available */

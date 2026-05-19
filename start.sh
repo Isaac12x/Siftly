@@ -31,7 +31,7 @@ if [ ! -d "node_modules" ]; then
 fi
 
 # ── 3. Set up database ────────────────────────────────────────────────────────
-GENERATED_CLIENT="app/generated/prisma/client/index.js"
+GENERATED_CLIENT="app/generated/prisma/client.ts"
 SCHEMA_FILE="prisma/schema.prisma"
 
 # Only regenerate if client is missing or schema is newer

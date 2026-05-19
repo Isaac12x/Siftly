@@ -5,6 +5,8 @@ interface BookmarkRow {
   id: string
   tweetId: string
   text: string
+  articleUrl: string | null
+  articleContent: string | null
   authorHandle: string
   authorName: string
   source: string
@@ -105,7 +107,7 @@ export async function exportCategoryAsZip(categorySlug: string): Promise<Buffer>
   const mediaFolder = zip.folder('media')
 
   const manifestRows: string[] = [
-    buildCsvRow(['tweetId', 'text', 'author', 'url', 'categories', 'date']),
+    buildCsvRow(['tweetId', 'text', 'articleUrl', 'articleContent', 'author', 'url', 'categories', 'date']),
   ]
 
   let mediaIndex = 0
@@ -118,6 +120,8 @@ export async function exportCategoryAsZip(categorySlug: string): Promise<Buffer>
       buildCsvRow([
         bookmark.tweetId,
         bookmark.text,
+        bookmark.articleUrl ?? '',
+        bookmark.articleContent ?? '',
         bookmark.authorHandle,
         tweetUrl,
         categoryNames,
@@ -149,6 +153,8 @@ export async function exportAllBookmarksCsv(): Promise<string> {
   const headers = buildCsvRow([
     'tweetId',
     'text',
+    'articleUrl',
+    'articleContent',
     'authorHandle',
     'source',
     'categories',
@@ -164,6 +170,8 @@ export async function exportAllBookmarksCsv(): Promise<string> {
     return buildCsvRow([
       bookmark.tweetId,
       bookmark.text,
+      bookmark.articleUrl ?? '',
+      bookmark.articleContent ?? '',
       bookmark.authorHandle,
       bookmark.source,
       categories,
@@ -185,6 +193,8 @@ export async function exportBookmarksJson(bookmarkIds?: string[]): Promise<strin
   const output = bookmarks.map((bookmark) => ({
     tweetId: bookmark.tweetId,
     text: bookmark.text,
+    articleUrl: bookmark.articleUrl,
+    articleContent: bookmark.articleContent,
     authorHandle: bookmark.authorHandle,
     authorName: bookmark.authorName,
     source: bookmark.source,

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
 import { analyzeBatch } from '@/lib/vision-analyzer'
 import { AIClient, resolveAIClient } from '@/lib/ai-client'
-import { getProvider } from '@/lib/settings'
+import { getApiKeySettingKey, getProvider } from '@/lib/settings'
 
 // GET: returns progress stats
 export async function GET(): Promise<NextResponse> {
@@ -24,7 +24,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   const provider = await getProvider()
-  const keyName = provider === 'openai' ? 'openaiApiKey' : 'anthropicApiKey'
+  const keyName = getApiKeySettingKey(provider)
   const setting = await prisma.setting.findUnique({ where: { key: keyName } })
   const dbKey = setting?.value?.trim()
 

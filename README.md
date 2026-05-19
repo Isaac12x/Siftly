@@ -91,16 +91,13 @@ Open [http://localhost:3000](http://localhost:3000)
 
 ## AI Authentication
 
-Siftly automatically detects the best available auth method — no configuration needed in the most common case.
+Siftly supports three AI provider modes from the Settings page:
 
-### Priority order
-
-| # | Method | How |
-|---|--------|-----|
-| 1 | **Claude Code CLI** *(zero config)* | Already signed in? Siftly reads your session from the macOS keychain automatically |
-| 2 | **API key in Settings** | Open Settings in the app and paste your key |
-| 3 | **`ANTHROPIC_API_KEY` env var** | Set in `.env.local` or your shell environment |
-| 4 | **Local proxy** | Set `ANTHROPIC_BASE_URL` to any Anthropic-compatible endpoint |
+| Provider | Auth / config order |
+|---|---|
+| **Anthropic** | Claude CLI → saved API key in Settings → `ANTHROPIC_API_KEY` → `ANTHROPIC_BASE_URL` |
+| **OpenAI** | Codex CLI → saved API key in Settings → `OPENAI_API_KEY` → `OPENAI_BASE_URL` |
+| **Local** | Named local endpoints in Settings → fallback `LOCAL_AI_BASE_URL` + `LOCAL_AI_MODEL` → optional `LOCAL_AI_API_KEY` |
 
 ### Claude Code CLI (no API key needed)
 
@@ -117,6 +114,10 @@ The Settings page shows a green **"Claude CLI detected — no API key needed"** 
 3. Open Siftly → Settings → paste it in
 
 New accounts include $5 free credit — enough for thousands of bookmarks at Haiku pricing (~$0.00025/bookmark).
+
+### Local models
+
+The **Local** provider works with named local endpoints in **Settings → AI Provider → Local**. Save a few servers with custom names, choose which one is active, and optionally discover models from the active endpoint. This works with **Ollama**, **LM Studio**, **mlx-lm**, **mlx**, **llama.cpp**, **llama-cli**, and similar OpenAI-compatible servers. If your local server needs auth, add the optional local API key there too.
 
 ---
 
@@ -238,19 +239,25 @@ All settings are manageable in the **Settings** page at `/settings` or via envir
 | Setting | Env Var | Description |
 |---------|---------|-------------|
 | Anthropic API Key | `ANTHROPIC_API_KEY` | Optional if Claude CLI is signed in — otherwise required for AI features |
-| API Base URL | `ANTHROPIC_BASE_URL` | Custom endpoint for proxies or local Anthropic-compatible models |
+| Anthropic Base URL | `ANTHROPIC_BASE_URL` | Custom endpoint for Anthropic-compatible proxies |
 | AI Model | Settings page only | Haiku 4.5 (default, fastest/cheapest), Sonnet 4.6, Opus 4.6 |
 | OpenAI Key | `OPENAI_API_KEY` | Alternative provider — GPT-4.1 Mini/Nano/Full, o4-mini, o3 |
 | MiniMax Key | `MINIMAX_API_KEY` | Alternative provider — M2.7 (1M context), M2.5, M2.5-highspeed |
 | MiniMax Base URL | `MINIMAX_BASE_URL` | Custom MiniMax API endpoint (default: `https://api.minimax.io/v1`) |
+| OpenAI API Key | `OPENAI_API_KEY` | Optional if Codex CLI is signed in |
+| OpenAI Base URL | `OPENAI_BASE_URL` | Custom OpenAI-compatible endpoint |
+| Local Base URL | `LOCAL_AI_BASE_URL` | Default fallback local endpoint used before any named Settings endpoints are saved |
+| Local Model | `LOCAL_AI_MODEL` | Default fallback model identifier paired with `LOCAL_AI_BASE_URL` |
+| Local API Key | `LOCAL_AI_API_KEY` | Optional bearer token for local servers that require auth |
 | Database | `DATABASE_URL` | SQLite file path (default: `file:./prisma/dev.db`) |
 
-### Custom API Endpoint
+### Local endpoint fallback example
 
-Point Siftly at any Anthropic-compatible server:
+Define the default local endpoint Siftly should use before you save named endpoints in Settings:
 
 ```env
-ANTHROPIC_BASE_URL=http://localhost:8080
+LOCAL_AI_BASE_URL=http://127.0.0.1:11434/v1
+LOCAL_AI_MODEL=llama3.2
 ```
 
 ---

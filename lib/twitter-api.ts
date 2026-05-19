@@ -1,4 +1,10 @@
 import prisma from '@/lib/db'
+import {
+  buildArticleImportFields,
+  extractArticleUrlsFromRawJson,
+  extractEmbeddedArticleContentFromRawJson,
+  fetchFirstArticleContent,
+} from '@/lib/article-extractor'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -264,6 +270,12 @@ export async function importTweets(
         if (!isNaN(d.getTime())) parsedDate = d
       }
 
+      const rawJson = JSON.stringify(tweet)
+      const articleUrls = extractArticleUrlsFromRawJson(rawJson)
+      const embeddedArticle = extractEmbeddedArticleContentFromRawJson(rawJson)
+      const article = embeddedArticle ?? await fetchFirstArticleContent(articleUrls)
+      const articleFields = buildArticleImportFields(articleUrls, article)
+
       const created = await prisma.bookmark.create({
         data: {
           tweetId: tweet.rest_id,
@@ -271,7 +283,8 @@ export async function importTweets(
           authorHandle: userLegacy.screen_name ?? 'unknown',
           authorName: userLegacy.name ?? 'Unknown',
           tweetCreatedAt: parsedDate,
-          rawJson: JSON.stringify(tweet),
+          rawJson,
+          ...articleFields,
         },
       })
 

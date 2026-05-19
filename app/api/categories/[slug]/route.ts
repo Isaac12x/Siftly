@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
+import { seedDefaultCategories } from '@/lib/categorizer'
+import {
+  extractBookmarkEngagement,
+  summarizeEngagementSubcategories,
+} from '@/lib/engagement'
 
 const DEFAULT_PAGE = 1
 const DEFAULT_LIMIT = 24
@@ -24,6 +29,8 @@ export async function GET(request: NextRequest, context: RouteContext): Promise<
   const skip = (page - 1) * limit
 
   try {
+    await seedDefaultCategories()
+
     const category = await prisma.category.findUnique({
       where: { slug },
     })
@@ -32,13 +39,15 @@ export async function GET(request: NextRequest, context: RouteContext): Promise<
       return NextResponse.json({ error: `Category not found: ${slug}` }, { status: 404 })
     }
 
-    const [bookmarks, total] = await Promise.all([
+    const where = {
+      categories: {
+        some: { category: { slug } },
+      },
+    } as const
+
+    const [bookmarks, total, engagementRows] = await Promise.all([
       prisma.bookmark.findMany({
-        where: {
-          categories: {
-            some: { category: { slug } },
-          },
-        },
+        where,
         skip,
         take: limit,
         orderBy: { importedAt: 'desc' },
@@ -58,14 +67,16 @@ export async function GET(request: NextRequest, context: RouteContext): Promise<
           },
         },
       }),
-      prisma.bookmark.count({
-        where: {
-          categories: {
-            some: { category: { slug } },
-          },
-        },
+      prisma.bookmark.count({ where }),
+      prisma.bookmark.findMany({
+        where,
+        select: { rawJson: true },
       }),
     ])
+
+    const subcategories = summarizeEngagementSubcategories(
+      engagementRows.map((bookmark) => extractBookmarkEngagement(bookmark.rawJson)),
+    )
 
     const formatted = bookmarks.map((bookmark) => ({
       id: bookmark.id,
@@ -73,8 +84,10 @@ export async function GET(request: NextRequest, context: RouteContext): Promise<
       text: bookmark.text,
       authorHandle: bookmark.authorHandle,
       authorName: bookmark.authorName,
+      source: bookmark.source,
       tweetCreatedAt: bookmark.tweetCreatedAt?.toISOString() ?? null,
       importedAt: bookmark.importedAt.toISOString(),
+      engagement: extractBookmarkEngagement(bookmark.rawJson),
       mediaItems: bookmark.mediaItems.map((m) => ({
         id: m.id,
         type: m.type,
@@ -100,6 +113,7 @@ export async function GET(request: NextRequest, context: RouteContext): Promise<
         isAiGenerated: category.isAiGenerated,
         createdAt: category.createdAt.toISOString(),
       },
+      subcategories,
       bookmarks: formatted,
       total,
       page,

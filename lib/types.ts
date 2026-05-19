@@ -1,3 +1,5 @@
+import type { BookmarkEngagement } from './engagement'
+
 export interface MediaItem {
   id: string
   type: string
@@ -18,12 +20,16 @@ export interface BookmarkWithMedia {
   id: string
   tweetId: string
   text: string
+  articleUrl?: string | null
+  articleContent?: string | null
   authorHandle: string
   authorName: string
+  source?: string
   tweetCreatedAt: string | null
   importedAt?: string
   mediaItems: MediaItem[]
   categories: BookmarkCategory[]
+  engagement?: BookmarkEngagement
 }
 
 export interface Category {

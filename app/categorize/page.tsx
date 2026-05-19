@@ -5,11 +5,12 @@ import Link from 'next/link'
 import { Sparkles, Loader2, CheckCircle, ChevronRight, Eye, Tag, Brain, Layers, StopCircle } from 'lucide-react'
 import * as Progress from '@radix-ui/react-progress'
 
-type Stage = 'vision' | 'entities' | 'enrichment' | 'categorize' | 'parallel' | null
+type Stage = 'vision' | 'entities' | 'enrichment' | 'taxonomy' | 'categorize' | 'parallel' | null
 
 interface StageCounts {
   visionTagged: number
   entitiesExtracted: number
+  categoriesGenerated: number
   enriched: number
   categorized: number
 }
@@ -40,10 +41,15 @@ const STAGE_INFO: Record<NonNullable<Stage>, { label: string; icon: React.ReactN
     icon: <Brain size={14} />,
     desc: 'Creating 30-50 searchable tags per bookmark for AI search',
   },
+  taxonomy: {
+    label: 'Discovering collections',
+    icon: <Sparkles size={14} />,
+    desc: 'Reading the bookmark corpus and generating collections from recurring themes',
+  },
   categorize: {
     label: 'Categorizing',
     icon: <Layers size={14} />,
-    desc: 'Assigning each bookmark to the most relevant categories',
+    desc: 'Assigning each bookmark to the most relevant generated collections',
   },
   parallel: {
     label: 'Processing all stages in parallel',
@@ -73,7 +79,6 @@ export default function CategorizePage() {
         }
       } catch { /* ignore */ }
     })()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   async function stopCategorization() {
@@ -116,9 +121,14 @@ export default function CategorizePage() {
         }
         if (data.status === 'idle') {
           clearInterval(interval)
-          setDone(true)
           setRunning(false)
           setStopping(false)
+          if (data.error) {
+            setError(data.error)
+            setDone(false)
+          } else {
+            setDone(true)
+          }
         }
       } catch {
         clearInterval(interval)
@@ -141,7 +151,7 @@ export default function CategorizePage() {
         </div>
         <h1 className="text-2xl font-bold text-zinc-100">Categorize Bookmarks</h1>
         <p className="text-zinc-400 mt-1 text-sm">
-          4-stage AI pipeline: vision analysis → entity extraction → semantic tagging → categorization.
+          AI pipeline: vision analysis → entity extraction → semantic tagging → collection discovery → categorization.
         </p>
       </div>
 
@@ -155,7 +165,7 @@ export default function CategorizePage() {
             )}
             <p className="text-sm text-zinc-400 leading-relaxed">
               Analyzes images for text and context, mines tweet entities for free, generates
-              semantic search tags, then categorizes — all automatically.
+              semantic search tags, discovers collections from your posts, then categorizes — all automatically.
             </p>
             <div className="space-y-2">
               <button
@@ -196,6 +206,7 @@ export default function CategorizePage() {
                   { key: 'visionTagged', label: 'images analyzed', icon: <Eye size={13} />, active: status.stage === 'vision' || status.stage === 'parallel' },
                   { key: 'entitiesExtracted', label: 'entities extracted', icon: <Tag size={13} />, active: status.stage === 'entities' },
                   { key: 'enriched', label: 'bookmarks enriched', icon: <Brain size={13} />, active: status.stage === 'enrichment' || status.stage === 'parallel' },
+                  { key: 'categoriesGenerated', label: 'collections generated', icon: <Sparkles size={13} />, active: status.stage === 'taxonomy' },
                   { key: 'categorized', label: 'categorized', icon: <Layers size={13} />, active: status.stage === 'categorize' || status.stage === 'parallel' },
                 ].map(({ key, label, icon, active }) => {
                   const count = status.stageCounts[key as keyof StageCounts]
@@ -236,7 +247,7 @@ export default function CategorizePage() {
             )}
 
             {/* Overall progress bar */}
-            {(status?.stage === 'categorize' || status?.stage === 'parallel') && (
+            {(status?.stage === 'categorize' || status?.stage === 'taxonomy' || status?.stage === 'parallel') && (
               <div className="space-y-2">
                 <div className="flex justify-between text-xs text-zinc-500">
                   <span>{status.done} / {status.total} bookmarks</span>
@@ -264,6 +275,7 @@ export default function CategorizePage() {
                 <p className="text-zinc-500 text-sm mt-1">
                   {status.stageCounts.visionTagged} images analyzed ·{' '}
                   {status.stageCounts.enriched} bookmarks enriched ·{' '}
+                  {status.stageCounts.categoriesGenerated} collections generated ·{' '}
                   {status.stageCounts.categorized} categorized
                 </p>
               )}

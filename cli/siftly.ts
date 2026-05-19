@@ -61,6 +61,7 @@ async function cmdSearch(args: string[]) {
     where = {
       OR: keywords.flatMap((kw) => [
         { text: { contains: kw } },
+        { articleContent: { contains: kw } },
         { semanticTags: { contains: kw } },
         { entities: { contains: kw } },
       ]),
@@ -241,6 +242,8 @@ function formatBookmark(b: any) {
     id: b.id,
     tweetId: b.tweetId,
     text: b.text,
+    articleUrl: b.articleUrl,
+    articleContent: b.articleContent,
     authorHandle: b.authorHandle,
     authorName: b.authorName,
     source: b.source,

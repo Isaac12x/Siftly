@@ -9,7 +9,7 @@ import { NextRequest, NextResponse } from 'next/server'
  * The bookmarklet endpoint is excluded so cross-origin imports from x.com
  * continue to work regardless of auth configuration.
  */
-export function middleware(request: NextRequest): NextResponse {
+export function proxy(request: NextRequest): NextResponse {
   const username = process.env.SIFTLY_USERNAME?.trim()
   const password = process.env.SIFTLY_PASSWORD?.trim()
 

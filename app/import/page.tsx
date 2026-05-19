@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react'
 import Link from 'next/link'
-import { Upload, CheckCircle, ChevronRight, Loader2, Copy, Check, ExternalLink, Sparkles, Eye, Tag, Brain, Layers, StopCircle, RefreshCw, Clock, KeyRound, Trash2, AlertCircle, User, LogOut } from 'lucide-react'
+import { Upload, CheckCircle, ChevronRight, Loader2, Copy, Check, ExternalLink, Sparkles, Eye, Tag, Brain, Layers, StopCircle, RefreshCw, Clock, AlertCircle, User, LogOut } from 'lucide-react'
 import * as Progress from '@radix-ui/react-progress'
 
 type Step = 1 | 2 | 3
@@ -15,11 +15,12 @@ interface ImportResult {
   parsed: number
 }
 
-type Stage = 'vision' | 'entities' | 'enrichment' | 'categorize' | 'parallel' | null
+type Stage = 'vision' | 'entities' | 'enrichment' | 'taxonomy' | 'categorize' | 'parallel' | null
 
 interface StageCounts {
   visionTagged: number
   entitiesExtracted: number
+  categoriesGenerated: number
   enriched: number
   categorized: number
 }
@@ -50,10 +51,15 @@ const STAGE_INFO: Record<NonNullable<Stage>, { label: string; icon: React.ReactN
     icon: <Brain size={14} />,
     desc: 'Creating 30-50 searchable tags per bookmark for AI search',
   },
+  taxonomy: {
+    label: 'Discovering collections',
+    icon: <Sparkles size={14} />,
+    desc: 'Reading your bookmark corpus and generating collections from recurring themes',
+  },
   categorize: {
     label: 'Categorizing',
     icon: <Layers size={14} />,
-    desc: 'Assigning each bookmark to the most relevant categories',
+    desc: 'Assigning each bookmark to the most relevant generated collections',
   },
   parallel: {
     label: 'Processing all stages in parallel',
@@ -110,7 +116,8 @@ const BOOKMARKLET_SCRIPT = `(async function(){
       avatar:usr.profile_image_url_https||'',timestamp:leg.created_at||'',
       text:leg.full_text||leg.text||'',media:media,
       hashtags:(leg.entities&&leg.entities.hashtags||[]).map(function(h){return h.text;}),
-      urls:(leg.entities&&leg.entities.urls||[]).map(function(u){return u.expanded_url;}).filter(Boolean)});
+      urls:(leg.entities&&leg.entities.urls||[]).map(function(u){return u.expanded_url;}).filter(Boolean),
+      raw:t});
     btn.textContent='Export '+all.length+' '+label+' \u2192';
   }
   function isTweetObj(o){return o&&typeof o==='object'&&typeof o.rest_id==='string'&&o.rest_id.length>5&&(o.legacy||o.core);}
@@ -233,7 +240,8 @@ const CONSOLE_SCRIPT = `(async function() {
       id: t.rest_id, author: usr.name ?? 'Unknown', handle: '@' + (usr.screen_name ?? 'unknown'),
       timestamp: leg.created_at ?? '', text: leg.full_text ?? leg.text ?? '', media,
       hashtags: (leg.entities?.hashtags ?? []).map(h => h.text),
-      urls: (leg.entities?.urls ?? []).map(u => u.expanded_url).filter(Boolean)
+      urls: (leg.entities?.urls ?? []).map(u => u.expanded_url).filter(Boolean),
+      raw: t
     });
     btn.textContent = \`Export \${all.length} \${label} →\`;
   }
@@ -654,6 +662,8 @@ interface OAuthStatus {
   configured: boolean
   connected: boolean
   tokenExpired?: boolean
+  incompleteFetch?: boolean
+  lastSync?: string | null
   user?: { id?: string; name?: string; username?: string } | null
   error?: string
 }
@@ -665,6 +675,10 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
   const [syncing, setSyncing] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
   const [error, setError] = useState('')
+  const [rateLimited, setRateLimited] = useState<{ resetAt: number | null; reason: string; imported: number; skipped: number; total: number } | null>(null)
+  const [autoSync, setAutoSync] = useState<string>('off')
+  const [autoSyncLoading, setAutoSyncLoading] = useState(false)
+  const [lastSync, setLastSync] = useState<string | null>(null)
 
   // Check for OAuth callback params in URL
   useEffect(() => {
@@ -689,7 +703,37 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
       })
       .catch(() => setError('Could not connect to the server'))
       .finally(() => setLoading(false))
+
+    // Fetch auto-sync schedule status
+    fetch('/api/import/live')
+      .then(async (r) => {
+        if (!r.ok) return
+        const data = await r.json()
+        setAutoSync(data.syncInterval ?? 'off')
+        setLastSync(data.lastSync ?? null)
+      })
+      .catch(() => {})
   }, [])
+
+  async function handleAutoSyncChange(interval: string) {
+    setAutoSyncLoading(true)
+    try {
+      const res = await fetch('/api/import/live', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ syncInterval: interval }),
+      })
+      if (!res.ok) {
+        const data = await res.json()
+        throw new Error(data.error || 'Failed to update schedule')
+      }
+      setAutoSync(interval)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update schedule')
+    } finally {
+      setAutoSyncLoading(false)
+    }
+  }
 
   async function handleConnect() {
     setError('')
@@ -721,15 +765,30 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
 
   async function handleFetchBookmarks() {
     setError('')
+    setRateLimited(null)
     setSyncing(true)
     try {
       const res = await fetch('/api/import/x-oauth/fetch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ maxPages: 10 }),
+        body: JSON.stringify({}),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? 'Fetch failed')
+
+      if (data.rateLimited) {
+        setRateLimited({
+          resetAt: data.resetAt ?? null,
+          reason: data.rateLimitReason ?? 'rate_limit',
+          imported: data.imported ?? 0,
+          skipped: data.skipped ?? 0,
+          total: data.total ?? 0,
+        })
+        return
+      }
+
+      setRateLimited(null)
+      setStatus((s) => s ? { ...s, incompleteFetch: false } : s)
       onSynced({
         imported: data.imported ?? 0,
         skipped: data.skipped ?? 0,
@@ -832,6 +891,50 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
             </div>
           )}
 
+          {status.incompleteFetch && !rateLimited && (
+            <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-indigo-500/8 border border-indigo-500/20">
+              <AlertCircle size={15} className="text-indigo-400 shrink-0" />
+              <div>
+                <p className="text-sm text-indigo-300">Incomplete import</p>
+                <p className="text-xs text-zinc-500 mt-0.5">
+                  A previous fetch was interrupted. Click below to resume where you left off.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {rateLimited && (
+            <div className="space-y-3 p-4 rounded-xl bg-amber-500/8 border border-amber-500/20">
+              <div className="flex items-start gap-2.5">
+                <AlertCircle size={15} className="text-amber-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="text-sm text-amber-300 font-medium">
+                    {rateLimited.reason === 'usage_cap'
+                      ? 'X API usage cap exceeded'
+                      : 'X API rate limit reached'}
+                  </p>
+                  <p className="text-xs text-zinc-400">
+                    {rateLimited.reason === 'usage_cap' ? (
+                      <>Your X API plan has run out of credits. Add more credits or wait for your monthly allowance to reset, then resume.</>
+                    ) : (
+                      <>
+                        You&apos;ve hit the per-window rate limit.
+                        {rateLimited.resetAt && (
+                          <> Resets at {new Date(rateLimited.resetAt * 1000).toLocaleTimeString()}.</>
+                        )}
+                        {!rateLimited.resetAt && <> Try again in a few minutes.</>}
+                      </>
+                    )}
+                  </p>
+                  <p className="text-xs text-zinc-500">
+                    Progress so far: {rateLimited.imported} imported, {rateLimited.skipped} skipped ({rateLimited.total} fetched).
+                    Your position is saved — click below to resume where you left off.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
           <button
             onClick={handleFetchBookmarks}
             disabled={syncing}
@@ -842,6 +945,11 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
                 <Loader2 size={16} className="animate-spin" />
                 Fetching bookmarks...
               </>
+            ) : rateLimited || status.incompleteFetch ? (
+              <>
+                <RefreshCw size={16} />
+                Resume Fetching Bookmarks
+              </>
             ) : (
               <>
                 <RefreshCw size={16} />
@@ -849,6 +957,42 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
               </>
             )}
           </button>
+
+          {/* Auto-sync schedule */}
+          <div className="p-4 rounded-xl bg-zinc-800/50 border border-zinc-700/50 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Clock size={14} className="text-zinc-400" />
+                <span className="text-sm text-zinc-300 font-medium">Auto-sync schedule</span>
+              </div>
+              {autoSyncLoading && <Loader2 size={14} className="animate-spin text-zinc-500" />}
+            </div>
+            <select
+              value={autoSync}
+              onChange={(e) => handleAutoSyncChange(e.target.value)}
+              disabled={autoSyncLoading}
+              className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-700 text-sm text-zinc-300 focus:outline-none focus:border-indigo-500 disabled:opacity-50"
+            >
+              <option value="off">Off</option>
+              <option value="daily">Daily at midnight</option>
+              <option value="1h">Every hour</option>
+              <option value="4h">Every 4 hours</option>
+              <option value="8h">Every 8 hours</option>
+              <option value="24h">Every 24 hours</option>
+            </select>
+            <p className="text-xs text-zinc-500">
+              {autoSync === 'daily'
+                ? 'Bookmarks will be fetched at 00:00 and automatically categorized.'
+                : autoSync !== 'off'
+                ? `Bookmarks will be fetched every ${autoSync} and automatically categorized.`
+                : 'Enable to automatically pull and categorize new bookmarks.'}
+            </p>
+            {lastSync && (
+              <p className="text-xs text-zinc-600">
+                Last sync: {new Date(lastSync).toLocaleString()}
+              </p>
+            )}
+          </div>
         </>
       )}
 
@@ -951,6 +1095,7 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
   const [running, setRunning] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [done, setDone] = useState(false)
+  const [alreadyUpToDate, setAlreadyUpToDate] = useState(false)
   const [error, setError] = useState('')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -961,12 +1106,9 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
     }
   }, [])
 
-  // On mount: attach to running pipeline, or start one if new bookmarks were imported.
-  // importedCount: -1 = direct trigger (not from import), 0 = all skipped, >0 = new bookmarks
+  // On mount: attach to running pipeline, or start one when there is uncategorized work.
+  // importedCount: -1 = direct trigger, 0 = all imported rows were duplicates, >0 = new rows.
   useEffect(() => {
-    // All skipped — nothing to categorize
-    if (importedCount === 0) return
-
     void (async () => {
       try {
         const res = await fetch('/api/categorize')
@@ -978,7 +1120,17 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
           setStopping(data.status === 'stopping')
           pollStatus()
         } else {
-          // Start a fresh pipeline for the newly imported bookmarks
+          if (importedCount === 0 && !force) {
+            const statsRes = await fetch('/api/stats')
+            if (statsRes.ok) {
+              const stats = await statsRes.json() as { uncategorizedCount?: number }
+              if ((stats.uncategorizedCount ?? 0) === 0) {
+                setAlreadyUpToDate(true)
+                return
+              }
+            }
+          }
+
           void startCategorization(force)
         }
       } catch {
@@ -1004,6 +1156,7 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
     setRunning(true)
     setStopping(false)
     setDone(false)
+    setAlreadyUpToDate(false)
     try {
       const res = await fetch('/api/categorize', {
         method: 'POST',
@@ -1034,9 +1187,17 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
         if (data.status === 'idle') {
           if (pollRef.current) clearInterval(pollRef.current)
           pollRef.current = null
-          setDone(true)
           setRunning(false)
           setStopping(false)
+          if (data.error) {
+            setDone(false)
+            setError(data.error)
+          } else if (data.total === 0) {
+            setDone(false)
+            setAlreadyUpToDate(true)
+          } else {
+            setDone(true)
+          }
         }
       } catch {
         pollFailures++
@@ -1088,6 +1249,7 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
                 { key: 'visionTagged', label: 'images analyzed', icon: <Eye size={13} />, active: status.stage === 'vision' || status.stage === 'parallel' },
                 { key: 'entitiesExtracted', label: 'entities extracted', icon: <Tag size={13} />, active: status.stage === 'entities' },
                 { key: 'enriched', label: 'bookmarks enriched', icon: <Brain size={13} />, active: status.stage === 'enrichment' || status.stage === 'parallel' },
+                { key: 'categoriesGenerated', label: 'collections generated', icon: <Sparkles size={13} />, active: status.stage === 'taxonomy' },
                 { key: 'categorized', label: 'categorized', icon: <Layers size={13} />, active: status.stage === 'categorize' || status.stage === 'parallel' },
               ] as { key: keyof StageCounts; label: string; icon: React.ReactNode; active: boolean }[]).map(({ key, label, icon, active }) => {
                 const count = status.stageCounts[key]
@@ -1126,8 +1288,8 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
             </p>
           )}
 
-          {/* Progress bar during categorize/parallel stage */}
-          {(status?.stage === 'categorize' || status?.stage === 'parallel') && (
+          {/* Progress bar during taxonomy/categorize/parallel stage */}
+          {(status?.stage === 'categorize' || status?.stage === 'taxonomy' || status?.stage === 'parallel') && (
             <div className="space-y-2">
               <div className="flex justify-between text-xs text-zinc-500">
                 <span>{status.done} / {status.total} bookmarks</span>
@@ -1144,7 +1306,7 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
         </div>
       )}
 
-      {done && (
+      {done && !error && (
         <div className="flex flex-col items-center gap-5 py-6">
           <div className="w-14 h-14 rounded-2xl bg-emerald-500/10 flex items-center justify-center">
             <CheckCircle size={32} className="text-emerald-400" />
@@ -1155,6 +1317,7 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
               <p className="text-zinc-500 text-sm mt-1">
                 {status.stageCounts.visionTagged} images analyzed ·{' '}
                 {status.stageCounts.enriched} bookmarks enriched ·{' '}
+                {status.stageCounts.categoriesGenerated} collections generated ·{' '}
                 {status.stageCounts.categorized} categorized
               </p>
             )}
@@ -1179,14 +1342,14 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
       )}
 
       {/* All bookmarks already existed — nothing new to categorize */}
-      {importedCount === 0 && !running && (
+      {alreadyUpToDate && !running && !done && !error && (
         <div className="flex flex-col items-center gap-5 py-6">
           <div className="w-14 h-14 rounded-2xl bg-zinc-800 flex items-center justify-center">
             <CheckCircle size={32} className="text-zinc-500" />
           </div>
           <div className="text-center">
             <p className="text-xl font-bold text-zinc-100">Already up to date</p>
-            <p className="text-zinc-500 text-sm mt-1">All bookmarks in this file were already imported</p>
+            <p className="text-zinc-500 text-sm mt-1">All bookmarks are already processed</p>
           </div>
           <div className="flex items-center gap-3">
             <Link

@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
+import {
+  buildArticleImportFields,
+  extractArticleUrlsFromRawJson,
+  extractEmbeddedArticleContentFromRawJson,
+  fetchFirstArticleContent,
+} from '@/lib/article-extractor'
 
 const ALLOWED_ORIGINS = new Set(['https://x.com', 'https://twitter.com'])
 
@@ -145,6 +151,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const userLegacy = tweet.core?.user_results?.result?.legacy ?? {}
     const media = extractMedia(tweet)
 
+    const rawJson = JSON.stringify(tweet)
+    const articleUrls = extractArticleUrlsFromRawJson(rawJson)
+    const embeddedArticle = extractEmbeddedArticleContentFromRawJson(rawJson)
+    const article = embeddedArticle ?? await fetchFirstArticleContent(articleUrls)
+    const articleFields = buildArticleImportFields(articleUrls, article)
+
     const created = await prisma.bookmark.create({
       data: {
         tweetId: tweet.rest_id,
@@ -154,7 +166,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         tweetCreatedAt: tweet.legacy?.created_at
           ? new Date(tweet.legacy.created_at)
           : null,
-        rawJson: JSON.stringify(tweet),
+        rawJson,
+        ...articleFields,
         source,
       },
     })

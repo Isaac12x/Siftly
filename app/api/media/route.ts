@@ -1,21 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-
-const ALLOWED_HOSTS = new Set([
-  'pbs.twimg.com',
-  'video.twimg.com',
-  'ton.twimg.com',
-  'abs.twimg.com',
-  'unavatar.io',
-])
-
-function isAllowedUrl(urlStr: string): boolean {
-  try {
-    const { protocol, hostname } = new URL(urlStr)
-    return protocol === 'https:' && ALLOWED_HOSTS.has(hostname)
-  } catch {
-    return false
-  }
-}
+import { isProxyableMediaUrl } from '@/lib/media'
 
 function getFilename(urlStr: string, contentType: string): string {
   try {
@@ -40,20 +24,22 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Missing url parameter' }, { status: 400 })
   }
 
-  if (!isAllowedUrl(mediaUrl)) {
+  if (!isProxyableMediaUrl(mediaUrl)) {
     return NextResponse.json({ error: 'URL not allowed' }, { status: 403 })
   }
 
   try {
     // Forward Range header so video seeking / partial content works correctly
     const rangeHeader = request.headers.get('range')
+    const acceptsVideo = mediaUrl.includes('video.twimg.com') || mediaUrl.includes('.mp4')
 
     const upstream = await fetch(mediaUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Referer': 'https://twitter.com/',
-        'Origin': 'https://twitter.com',
-        'Accept': '*/*',
+        'Referer': 'https://x.com/',
+        'Accept': acceptsVideo
+          ? '*/*'
+          : 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
         ...(rangeHeader ? { 'Range': rangeHeader } : {}),
       },
     })

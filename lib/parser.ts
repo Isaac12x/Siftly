@@ -13,6 +13,8 @@ export interface ParsedBookmark {
   hashtags: string[]
   urls: string[]
   media: ParsedMedia[]
+  articleUrl?: string
+  articleContent?: string
   rawJson: string
 }
 
@@ -62,6 +64,9 @@ interface RawTweet {
   extended_entities?: {
     media?: TwitterMediaEntity[]
   }
+  articleUrl?: string | null
+  articleContent?: string | null
+  __rawJson?: string
   [key: string]: unknown
 }
 
@@ -157,7 +162,9 @@ function parseSingleTweet(tweet: RawTweet): ParsedBookmark | null {
     hashtags: extractHashtags(tweet),
     urls: extractUrls(tweet),
     media: extractMedia(tweet),
-    rawJson: JSON.stringify(tweet),
+    articleUrl: tweet.articleUrl ?? undefined,
+    articleContent: tweet.articleContent ?? undefined,
+    rawJson: tweet.__rawJson ?? JSON.stringify(tweet),
   }
 }
 
@@ -213,6 +220,7 @@ interface ConsoleExportBookmark {
   media?: { type?: string; url?: string }[]
   hashtags?: string[]
   urls?: string[]
+  raw?: unknown
 }
 
 function isConsoleExportFormat(obj: unknown): obj is { bookmarks: ConsoleExportBookmark[] } {
@@ -248,6 +256,7 @@ function convertConsoleExportRow(row: ConsoleExportBookmark): RawTweet {
       media: mediaEntities.length > 0 ? mediaEntities : undefined,
     },
     extended_entities: mediaEntities.length > 0 ? { media: mediaEntities } : undefined,
+    __rawJson: row.raw ? JSON.stringify(row.raw) : undefined,
   }
 }
 
@@ -258,6 +267,8 @@ interface SiftlyExportItem {
   authorName?: string
   tweetCreatedAt?: string
   mediaItems?: { type?: string; url?: string; thumbnailUrl?: string }[]
+  articleUrl?: string | null
+  articleContent?: string | null
   [key: string]: unknown
 }
 
@@ -284,6 +295,8 @@ function convertSiftlyExportRow(row: SiftlyExportItem): RawTweet {
     user: { screen_name: row.authorHandle || 'unknown', name: row.authorName || 'Unknown' },
     entities: { media: mediaEntities.length > 0 ? mediaEntities : undefined },
     extended_entities: mediaEntities.length > 0 ? { media: mediaEntities } : undefined,
+    articleUrl: row.articleUrl ?? undefined,
+    articleContent: row.articleContent ?? undefined,
   }
 }
 

@@ -88,7 +88,7 @@ async function analyzeImageViaCli(imageUrl: string): Promise<string> {
     const jsonMatch = result.data.match(/\{[\s\S]*\}/)
     if (!jsonMatch) return ''
     try { JSON.parse(jsonMatch[0]); return jsonMatch[0] } catch { return '' }
-  } else {
+  } else if (provider === 'anthropic') {
     if (!(await getCliAvailability())) return ''
     const model = await getActiveModel()
     const cliModel = modelNameToCliAlias(model)
@@ -98,6 +98,8 @@ async function analyzeImageViaCli(imageUrl: string): Promise<string> {
     if (!jsonMatch) return ''
     try { JSON.parse(jsonMatch[0]); return jsonMatch[0] } catch { return '' }
   }
+
+  return ''
 }
 
 async function analyzeImageWithRetry(
@@ -321,6 +323,7 @@ const ENRICH_CONCURRENCY = 2
 export interface BookmarkForEnrichment {
   id: string
   text: string
+  articleContent?: string | null
   imageTags: string[] // filtered, non-empty
   entities?: {
     hashtags?: string[]
@@ -342,6 +345,7 @@ export interface EnrichmentResult {
 function buildEnrichmentPrompt(bookmarks: BookmarkForEnrichment[]): string {
   const items = bookmarks.map((b) => {
     const entry: Record<string, unknown> = { id: b.id, text: b.text.slice(0, 500) }
+    if (b.articleContent) entry.article = b.articleContent.slice(0, 2_000)
     const imgCtx = b.imageTags.map((raw) => buildImageContext(raw)).filter(Boolean).join(' | ')
     if (imgCtx) entry.imageContext = imgCtx
     if (b.entities?.hashtags?.length) entry.hashtags = b.entities.hashtags.slice(0, 8)
@@ -404,7 +408,7 @@ export async function enrichBatchSemanticTags(
         catch { console.warn('[enrich] Codex CLI response parse failed, falling back to SDK') }
       }
     }
-  } else {
+  } else if (provider === 'anthropic') {
     if (await getCliAvailability()) {
       const model = await getActiveModel()
       const cliModel = modelNameToCliAlias(model)
@@ -474,6 +478,7 @@ export async function enrichAllBookmarks(
       select: {
         id: true,
         text: true,
+        articleContent: true,
         entities: true,
         mediaItems: { select: { imageTags: true } },
       },
@@ -491,7 +496,7 @@ export async function enrichAllBookmarks(
         .map((m) => m.imageTags)
         .filter((t): t is string => t !== null && t !== '' && t !== '{}')
 
-      if (imageTags.length === 0 && b.text.length < 20) {
+      if (imageTags.length === 0 && b.text.length < 20 && !b.articleContent) {
         trivialIds.push(b.id)
         continue
       }
@@ -501,7 +506,7 @@ export async function enrichAllBookmarks(
         try { entities = JSON.parse(b.entities) as typeof entities } catch { /* ignore */ }
       }
 
-      toEnrich.push({ id: b.id, text: b.text, imageTags, entities })
+      toEnrich.push({ id: b.id, text: b.text, articleContent: b.articleContent, imageTags, entities })
     }
 
     // Mark trivial bookmarks in one batch
@@ -564,9 +569,10 @@ export async function enrichBookmarkSemanticTags(
   imageTags: string[],
   client: AIClient,
   entities?: BookmarkForEnrichment['entities'],
+  articleContent?: string | null,
 ): Promise<string[]> {
   const results = await enrichBatchSemanticTags(
-    [{ id: bookmarkId, text: tweetText, imageTags, entities }],
+    [{ id: bookmarkId, text: tweetText, articleContent, imageTags, entities }],
     client,
   )
   const result = results[0]

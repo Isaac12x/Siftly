@@ -1,9 +1,10 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { resolveAnthropicClient } from './claude-cli-auth'
-import { resolveOpenAIClient } from './openai-auth'
 import { resolveMiniMaxClient } from './minimax-auth'
-import { getProvider } from './settings'
+import { resolveLocalOpenAIClient, resolveOpenAIClient } from './openai-auth'
+import { createLocalChatCompletion } from './local-ai'
+import { getLocalBaseUrl, getProvider } from './settings'
 
 export interface AIContentBlock {
   type: 'text' | 'image'
@@ -21,7 +22,7 @@ export interface AIResponse {
 }
 
 export interface AIClient {
-  provider: 'anthropic' | 'openai' | 'minimax'
+  provider: 'anthropic' | 'openai' | 'minimax' | 'local'
   createMessage(params: {
     model: string
     max_tokens: number
@@ -68,10 +69,42 @@ export class AnthropicAIClient implements AIClient {
 
 // Wrap OpenAI SDK
 export class OpenAIAIClient implements AIClient {
-  provider = 'openai' as const
-  constructor(private sdk: OpenAI) {}
+  constructor(
+    private sdk: OpenAI,
+    public provider: 'openai' | 'local' = 'openai',
+    private localConfig?: { baseURL: string; apiKey: string },
+  ) {}
 
   async createMessage(params: { model: string; max_tokens: number; messages: AIMessage[] }): Promise<AIResponse> {
+    if (this.provider === 'local') {
+      if (!this.localConfig) throw new Error('Missing local endpoint configuration')
+
+      const localMessages = params.messages.map((m) => ({
+        role: m.role,
+        content: typeof m.content === 'string'
+          ? m.content
+          : m.content.map((b) => {
+              if (b.type === 'image' && b.source) {
+                return {
+                  type: 'image_url' as const,
+                  image_url: { url: `data:${b.source.media_type};base64,${b.source.data}` },
+                }
+              }
+              return { type: 'text' as const, text: b.text ?? '' }
+            }),
+      }))
+
+      const completion = await createLocalChatCompletion({
+        baseUrl: this.localConfig.baseURL,
+        apiKey: this.localConfig.apiKey,
+        model: params.model,
+        maxTokens: params.max_tokens,
+        messages: localMessages,
+      })
+
+      return { text: completion.text }
+    }
+
     const messages: OpenAI.ChatCompletionMessageParam[] = params.messages.map((m): OpenAI.ChatCompletionMessageParam => {
       if (typeof m.content === 'string') {
         if (m.role === 'assistant') return { role: 'assistant' as const, content: m.content }
@@ -150,7 +183,18 @@ export async function resolveAIClient(options: {
 
   if (provider === 'openai') {
     const client = resolveOpenAIClient(options)
-    return new OpenAIAIClient(client)
+    return new OpenAIAIClient(client, 'openai')
+  }
+
+  if (provider === 'local') {
+    const baseURL = await getLocalBaseUrl()
+    const client = resolveLocalOpenAIClient({ ...options, baseURL })
+    const apiKey =
+      options.overrideKey?.trim() ||
+      options.dbKey?.trim() ||
+      process.env.LOCAL_AI_API_KEY?.trim() ||
+      'local'
+    return new OpenAIAIClient(client, 'local', { baseURL, apiKey })
   }
 
   const client = resolveAnthropicClient(options)

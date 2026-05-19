@@ -110,6 +110,10 @@ function createCodexOpenAIClient(baseURL?: string): OpenAI | null {
   return new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) })
 }
 
+function createOpenAIClient(apiKey: string, baseURL?: string): OpenAI {
+  return new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) })
+}
+
 export function resolveOpenAIClient(options: {
   overrideKey?: string
   dbKey?: string
@@ -118,20 +122,40 @@ export function resolveOpenAIClient(options: {
   const baseURL = options.baseURL ?? process.env.OPENAI_BASE_URL
 
   if (options.overrideKey?.trim()) {
-    return new OpenAI({ apiKey: options.overrideKey.trim(), ...(baseURL ? { baseURL } : {}) })
+    return createOpenAIClient(options.overrideKey.trim(), baseURL)
   }
 
   if (options.dbKey?.trim()) {
-    return new OpenAI({ apiKey: options.dbKey.trim(), ...(baseURL ? { baseURL } : {}) })
+    return createOpenAIClient(options.dbKey.trim(), baseURL)
   }
 
   const cliClient = createCodexOpenAIClient(baseURL)
   if (cliClient) return cliClient
 
   const envKey = process.env.OPENAI_API_KEY?.trim()
-  if (envKey) return new OpenAI({ apiKey: envKey, ...(baseURL ? { baseURL } : {}) })
+  if (envKey) return createOpenAIClient(envKey, baseURL)
 
-  if (baseURL) return new OpenAI({ apiKey: 'proxy', baseURL })
+  if (baseURL) return createOpenAIClient('proxy', baseURL)
 
   throw new Error('No OpenAI API key found. Add your key in Settings, or set up Codex CLI.')
+}
+
+export function resolveLocalOpenAIClient(options: {
+  overrideKey?: string
+  dbKey?: string
+  baseURL?: string
+} = {}): OpenAI {
+  const baseURL = options.baseURL ?? process.env.LOCAL_AI_BASE_URL ?? process.env.OPENAI_BASE_URL
+
+  if (!baseURL?.trim()) {
+    throw new Error('No local model endpoint found. Add a Local Base URL in Settings or set LOCAL_AI_BASE_URL.')
+  }
+
+  const apiKey =
+    options.overrideKey?.trim() ||
+    options.dbKey?.trim() ||
+    process.env.LOCAL_AI_API_KEY?.trim() ||
+    'local'
+
+  return createOpenAIClient(apiKey, baseURL)
 }

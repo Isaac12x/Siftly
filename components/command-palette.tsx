@@ -4,9 +4,37 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { Search, X, ArrowRight, Loader2 } from 'lucide-react'
 import type { BookmarkWithMedia } from '@/lib/types'
+import { buildMediaCandidates } from '@/lib/media'
 
 interface SearchResult extends BookmarkWithMedia {
   total?: number
+}
+
+function ThumbnailImage({ src }: { src: string }) {
+  return <ThumbnailImageInner key={src} src={src} />
+}
+
+function ThumbnailImageInner({ src }: { src: string }) {
+  const candidates = buildMediaCandidates(src)
+  const [index, setIndex] = useState(0)
+
+  const activeSrc = candidates[index]
+  if (!activeSrc) return null
+
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={activeSrc}
+      alt=""
+      className="w-full h-full object-cover"
+      loading="lazy"
+      onError={() => {
+        if (index < candidates.length - 1) {
+          setIndex((current) => current + 1)
+        }
+      }}
+    />
+  )
 }
 
 export default function CommandPalette() {
@@ -157,8 +185,7 @@ export default function CommandPalette() {
                       {/* Thumbnail or icon */}
                       <div className="w-10 h-10 rounded-lg bg-zinc-800 border border-zinc-700 overflow-hidden shrink-0 flex items-center justify-center">
                         {thumb ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={thumb} alt="" className="w-full h-full object-cover" loading="lazy" />
+                          <ThumbnailImage src={thumb} />
                         ) : (
                           <Search size={14} className="text-zinc-600" />
                         )}

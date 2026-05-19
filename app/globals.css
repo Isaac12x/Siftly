@@ -46,26 +46,16 @@ body {
 
 .masonry-grid {
   display: grid;
-  grid-template-columns: 1fr;
-  gap: 12px;
-}
-
-@media (min-width: 768px) {
-  .masonry-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
-@media (min-width: 1280px) {
-  .masonry-grid {
-    grid-template-columns: repeat(3, 1fr);
-  }
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 18rem), 1fr));
+  gap: clamp(0.9rem, 1.8vw, 1.25rem);
+  align-items: start;
 }
 
 .masonry-item {
   width: 100%;
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 /* ── Scrollbar styling ────────────────────────────────────────────────────── */

@@ -1,7 +1,8 @@
+import { schedule as cronSchedule, type ScheduledTask } from 'node-cron'
 import prisma from '@/lib/db'
 import { fetchPage, parsePage, importTweets } from '@/lib/twitter-api'
 
-// ── Sync ────────────────────────────────────────────────────────────────────────
+// ── Sync (headless: auth_token + ct0) ────────────────────────────────────────
 
 export async function syncBookmarks(
   authToken: string,
@@ -57,11 +58,83 @@ export async function syncBookmarks(
   }
 }
 
-// ── Scheduler ───────────────────────────────────────────────────────────────────
+// ── Internal HTTP helper ─────────────────────────────────────────────────────
 
-type SyncInterval = '1h' | '4h' | '8h' | '24h'
+async function internalFetch(path: string, options?: RequestInit) {
+  const baseUrl = process.env.SIFTLY_INTERNAL_BASE_URL?.trim() || `http://127.0.0.1:${process.env.PORT || 3000}`
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...((options?.headers as Record<string, string>) || {}),
+  }
 
-const INTERVAL_MS: Record<SyncInterval, number> = {
+  // Add Basic Auth if middleware is configured
+  const username = process.env.SIFTLY_USERNAME?.trim()
+  const password = process.env.SIFTLY_PASSWORD?.trim()
+  if (username && password) {
+    headers['Authorization'] = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`
+  }
+
+  return fetch(`${baseUrl.replace(/\/$/, '')}${path}`, { ...options, headers })
+}
+
+// ── Sync via OAuth (uses existing API endpoint) ──────────────────────────────
+
+async function syncOAuthBookmarks(): Promise<{ imported: number; skipped: number } | null> {
+  const [accessToken, userId] = await Promise.all([
+    prisma.setting.findUnique({ where: { key: 'x_oauth_access_token' } }),
+    prisma.setting.findUnique({ where: { key: 'x_oauth_user_id' } }),
+  ])
+
+  if (!accessToken?.value || !userId?.value) return null
+
+  const res = await internalFetch('/api/import/x-oauth/fetch', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || 'OAuth fetch failed')
+
+  if (data.rateLimited) {
+    console.warn(`[x-sync] OAuth sync rate limited (${data.rateLimitReason}), imported ${data.imported ?? 0} so far`)
+    return { imported: data.imported ?? 0, skipped: data.skipped ?? 0 }
+  }
+
+  return { imported: data.imported ?? 0, skipped: data.skipped ?? 0 }
+}
+
+// ── Trigger categorization for new bookmarks ─────────────────────────────────
+
+async function triggerCategorization(): Promise<void> {
+  // Only run if there are uncategorized bookmarks
+  const uncategorized = await prisma.bookmark.count({ where: { enrichedAt: null } })
+  if (uncategorized === 0) {
+    console.log('[x-sync] No uncategorized bookmarks, skipping pipeline')
+    return
+  }
+
+  console.log(`[x-sync] Triggering categorization for ${uncategorized} uncategorized bookmarks`)
+  const res = await internalFetch('/api/categorize', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+
+  if (!res.ok) {
+    const data = await res.json()
+    // 409 = already running, that's fine
+    if (res.status !== 409) {
+      console.error('[x-sync] Failed to trigger categorization:', data.error)
+    }
+  } else {
+    console.log('[x-sync] Categorization pipeline started')
+  }
+}
+
+// ── Scheduler ────────────────────────────────────────────────────────────────
+
+type SyncInterval = '1h' | '4h' | '8h' | '24h' | 'daily'
+
+const INTERVAL_MS: Partial<Record<SyncInterval, number>> = {
   '1h': 60 * 60 * 1000,
   '4h': 4 * 60 * 60 * 1000,
   '8h': 8 * 60 * 60 * 1000,
@@ -69,6 +142,7 @@ const INTERVAL_MS: Record<SyncInterval, number> = {
 }
 
 let schedulerTimer: ReturnType<typeof setInterval> | null = null
+let cronTask: ScheduledTask | null = null
 let syncing = false
 
 export async function startScheduler() {
@@ -78,9 +152,17 @@ export async function startScheduler() {
   if (!intervalSetting?.value || intervalSetting.value === 'off') return
 
   const interval = intervalSetting.value as SyncInterval
+
+  if (interval === 'daily') {
+    // Cron: every day at 00:00
+    cronTask = cronSchedule('0 0 * * *', () => void runScheduledSync())
+    console.log('[x-sync] Daily scheduler started: runs at 00:00')
+    return
+  }
+
   const ms = INTERVAL_MS[interval]
   if (!ms) {
-    console.warn(`[x-sync] Invalid sync interval "${intervalSetting.value}" in database, not starting scheduler`)
+    console.warn(`[x-sync] Invalid sync interval "${intervalSetting.value}", not starting scheduler`)
     return
   }
 
@@ -92,27 +174,58 @@ export function stopScheduler() {
   if (schedulerTimer) {
     clearInterval(schedulerTimer)
     schedulerTimer = null
-    console.log('[x-sync] Scheduler stopped')
+    console.log('[x-sync] Interval scheduler stopped')
+  }
+  if (cronTask) {
+    cronTask.stop()
+    cronTask = null
+    console.log('[x-sync] Daily cron scheduler stopped')
   }
 }
 
 async function runScheduledSync() {
   if (syncing) return
+  syncing = true
 
   try {
-    const [authSetting, ct0Setting] = await Promise.all([
-      prisma.setting.findUnique({ where: { key: 'x_auth_token' } }),
-      prisma.setting.findUnique({ where: { key: 'x_ct0' } }),
-    ])
+    console.log(`[x-sync] Running scheduled sync at ${new Date().toISOString()}`)
 
-    if (!authSetting?.value || !ct0Setting?.value) {
-      console.log('[x-sync] Skipping scheduled sync: missing credentials')
-      return
+    let result: { imported: number; skipped: number } | null = null
+
+    // Try OAuth first (official API, preferred)
+    try {
+      result = await syncOAuthBookmarks()
+      if (result) {
+        console.log(`[x-sync] OAuth sync: ${result.imported} imported, ${result.skipped} skipped`)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.warn('[x-sync] OAuth sync failed, trying headless:', msg)
     }
 
-    console.log(`[x-sync] Running scheduled sync at ${new Date().toISOString()}`)
-    const result = await syncBookmarks(authSetting.value, ct0Setting.value)
-    console.log(`[x-sync] Sync complete: ${result.imported} imported, ${result.skipped} skipped`)
+    // Fall back to headless sync (auth_token + ct0)
+    if (!result) {
+      const [authSetting, ct0Setting] = await Promise.all([
+        prisma.setting.findUnique({ where: { key: 'x_auth_token' } }),
+        prisma.setting.findUnique({ where: { key: 'x_ct0' } }),
+      ])
+
+      if (!authSetting?.value || !ct0Setting?.value) {
+        console.log('[x-sync] Skipping scheduled sync: no credentials available (neither OAuth nor headless)')
+        return
+      }
+
+      // syncBookmarks sets syncing=true internally, but we've already set it
+      syncing = false
+      result = await syncBookmarks(authSetting.value, ct0Setting.value)
+      console.log(`[x-sync] Headless sync: ${result.imported} imported, ${result.skipped} skipped`)
+    }
+
+    // Auto-categorize if new bookmarks were imported
+    if (result.imported > 0) {
+      console.log(`[x-sync] ${result.imported} new bookmarks — triggering categorization`)
+      await triggerCategorization()
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error('[x-sync] Scheduled sync failed:', message)
@@ -120,13 +233,21 @@ async function runScheduledSync() {
       console.error('[x-sync] Auth error detected, stopping scheduler')
       stopScheduler()
     }
+  } finally {
+    syncing = false
   }
 }
 
 export function isSchedulerRunning() {
-  return schedulerTimer !== null
+  return schedulerTimer !== null || cronTask !== null
 }
 
 export function isSyncing() {
   return syncing
+}
+
+export function getSchedulerType(): 'cron' | 'interval' | null {
+  if (cronTask) return 'cron'
+  if (schedulerTimer) return 'interval'
+  return null
 }

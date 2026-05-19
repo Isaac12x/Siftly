@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
 import { ftsSearch } from '@/lib/fts'
 import { AIClient, resolveAIClient } from '@/lib/ai-client'
-import { getActiveModel, getProvider } from '@/lib/settings'
+import { getActiveModel, getApiKeySettingKey, getProvider } from '@/lib/settings'
 import { extractKeywords } from '@/lib/search-utils'
 import { getCliAvailability, claudePrompt, modelNameToCliAlias } from '@/lib/claude-cli-auth'
 import { getCodexCliAvailability, codexPrompt } from '@/lib/codex-cli'
@@ -26,17 +26,19 @@ function setCache(key: string, results: unknown): void {
 // ─── Module-level caches (avoid DB roundtrips on every search) ────────────────
 let _apiKey: string | null = null
 let _apiKeyExpiry = 0
+let _apiKeyProvider: string | null = null
 let _categoriesCache: { slug: string; name: string; description: string | null }[] | null = null
 let _categoriesCacheExpiry = 0
 
 async function getDbApiKey(): Promise<string> {
-  if (_apiKey !== null && Date.now() < _apiKeyExpiry) return _apiKey
   const provider = await getProvider()
-  const keyName = provider === 'openai' ? 'openaiApiKey' : 'anthropicApiKey'
+  if (_apiKey !== null && Date.now() < _apiKeyExpiry && _apiKeyProvider === provider) return _apiKey
+  const keyName = getApiKeySettingKey(provider)
   const setting = await prisma.setting.findUnique({ where: { key: keyName } })
   const fromDb = setting?.value?.trim() ?? ''
   _apiKey = fromDb
   _apiKeyExpiry = Date.now() + 60_000
+  _apiKeyProvider = provider
   return _apiKey
 }
 async function getAllCategories() {
@@ -111,6 +113,7 @@ function buildIndexEntry(b: {
   id: string
   tweetId: string
   text: string
+  articleContent: string | null
   authorHandle: string
   authorName: string
   semanticTags: string | null
@@ -122,6 +125,7 @@ function buildIndexEntry(b: {
 
   // Text — more generous limit for complex queries
   lines.push(`text: ${b.text.slice(0, 350)}`)
+  if (b.articleContent) lines.push(`article: ${b.articleContent.slice(0, 1_800)}`)
 
   // Image/media context — rich structured data
   for (const m of b.mediaItems) {
@@ -218,7 +222,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const MAX_CANDIDATES = 150 // smaller, richer set beats larger, noisier set
 
   const selectShape = {
-    id: true, tweetId: true, text: true, authorHandle: true, authorName: true,
+    id: true, tweetId: true, text: true, articleUrl: true, articleContent: true, authorHandle: true, authorName: true,
     tweetCreatedAt: true, importedAt: true, semanticTags: true, entities: true,
     mediaItems: { select: { id: true, type: true, url: true, thumbnailUrl: true, imageTags: true } },
     categories: {
@@ -234,6 +238,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // Build LIKE-based fallback conditions (used when FTS5 is empty/unavailable)
   const keywordConditions = keywords.flatMap((kw) => [
     { text: { contains: kw } },
+    { articleContent: { contains: kw } },
     { semanticTags: { contains: kw } },
     { entities: { contains: kw } },
     { mediaItems: { some: { imageTags: { contains: kw } } } },
@@ -317,6 +322,7 @@ HOW TO SEARCH:
 BOOKMARK FORMAT:
 [bookmark_id]
 text: tweet text (most direct signal)
+article: linked article/page content when available
 media: type | style | scene | action | mood | meme=template | ocr="text inside image" | objects | vtags=visual tags
 ai_tags: AI-generated search tags (pre-computed, highly reliable)
 #hashtags | tools: detected tools/products | @mentions
@@ -373,7 +379,7 @@ Constraints:
 
   if (!cliSucceeded) {
     if (!client) {
-      return NextResponse.json({ error: 'No CLI available and no API key configured. Add an API key in Settings or install Codex/Claude CLI.' }, { status: 400 })
+      return NextResponse.json({ error: 'No AI client available. Configure an API key, sign in with CLI, or set a local model endpoint in Settings.' }, { status: 400 })
     }
     try {
       const response = await client.createMessage({
@@ -403,6 +409,8 @@ Constraints:
         id: b.id,
         tweetId: b.tweetId,
         text: b.text,
+        articleUrl: b.articleUrl,
+        articleContent: b.articleContent,
         authorHandle: b.authorHandle,
         authorName: b.authorName,
         tweetCreatedAt: b.tweetCreatedAt?.toISOString() ?? null,

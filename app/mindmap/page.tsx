@@ -57,7 +57,7 @@ function extractLegend(nodes: Node[]): CategoryLegendItem[] {
     })
 }
 
-type CategorizeStage = 'vision' | 'entities' | 'enrichment' | 'categorize' | 'parallel' | null
+type CategorizeStage = 'vision' | 'entities' | 'enrichment' | 'taxonomy' | 'categorize' | 'parallel' | null
 
 interface CategorizeStatus {
   status: 'idle' | 'running' | 'stopping'
@@ -70,6 +70,7 @@ const STAGE_LABELS: Record<NonNullable<CategorizeStage>, string> = {
   entities: 'Extracting entities…',
   vision: 'Analyzing images…',
   enrichment: 'Generating semantic tags…',
+  taxonomy: 'Discovering collections…',
   categorize: 'Categorizing bookmarks…',
   parallel: 'Processing bookmarks in parallel…',
 }
@@ -92,7 +93,6 @@ function UncategorizedState({ totalBookmarks }: { totalBookmarks: number }) {
         }
       })
       .catch(() => {})
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   async function startCategorization() {
@@ -131,7 +131,7 @@ function UncategorizedState({ totalBookmarks }: { totalBookmarks: number }) {
     }, 1500)
   }
 
-  const progress = status?.stage === 'categorize' && status.total > 0
+  const progress = (status?.stage === 'categorize' || status?.stage === 'taxonomy') && status.total > 0
     ? Math.round((status.done / status.total) * 100)
     : null
 
@@ -154,7 +154,7 @@ function UncategorizedState({ totalBookmarks }: { totalBookmarks: number }) {
         <Loader2 size={36} className="text-indigo-400 animate-spin" />
         <div>
           <p className="text-zinc-200 font-semibold">{stageLabel}</p>
-          {status?.stage === 'categorize' && status.total > 0 && (
+          {(status?.stage === 'categorize' || status?.stage === 'taxonomy') && status.total > 0 && (
             <p className="text-zinc-500 text-sm mt-1">
               {status.done} / {status.total} bookmarks
               {progress !== null && ` (${progress}%)`}
@@ -250,7 +250,7 @@ function MindmapOverlay({
 
   const isPipelineRunning = pipeline?.status === 'running' || pipeline?.status === 'stopping'
   const stageLabel = status?.stage ? STAGE_LABELS[status.stage] : 'Starting…'
-  const progress = status?.stage === 'categorize' && status.total > 0
+  const progress = (status?.stage === 'categorize' || status?.stage === 'taxonomy') && status.total > 0
     ? Math.round((status.done / status.total) * 100)
     : null
 
@@ -272,7 +272,7 @@ function MindmapOverlay({
             <div>
               <p className="text-xl font-bold text-zinc-100">AI Categorization in Progress</p>
               <p className="text-zinc-400 text-sm mt-1.5">{stageLabel}</p>
-              {status?.stage === 'categorize' && status.total > 0 && (
+              {(status?.stage === 'categorize' || status?.stage === 'taxonomy') && status.total > 0 && (
                 <p className="text-zinc-500 text-sm mt-1">
                   {status.done} / {status.total} bookmarks
                   {progress !== null && ` (${progress}%)`}

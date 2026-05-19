@@ -16,6 +16,8 @@ model Bookmark {
   tweetCreatedAt DateTime?
   importedAt    DateTime  @default(now())
   rawJson       String    // full JSON stored as string
+  articleUrl    String?   // first external article URL resolved from tweet entities
+  articleContent String?  // cleaned article/page text for AI enrichment, categorization, and search
   semanticTags    String?   // JSON array of AI-generated searchable tags
   entities        String?   // JSON: {hashtags[], urls[], mentions[], tools[], tweetType}
   enrichedAt      DateTime? // when AI enrichment last ran — drives incremental processing

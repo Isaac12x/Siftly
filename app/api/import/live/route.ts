@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
-import { startScheduler, stopScheduler, isSchedulerRunning } from '@/lib/x-sync'
+import { startScheduler, stopScheduler, isSchedulerRunning, getSchedulerType } from '@/lib/x-sync'
 
 /** GET — return current X credentials status + schedule config */
 export async function GET() {
@@ -17,6 +17,7 @@ export async function GET() {
       syncInterval: interval?.value ?? 'off',
       lastSync: lastSync?.value ?? null,
       schedulerRunning: isSchedulerRunning(),
+      schedulerType: getSchedulerType(),
     })
   } catch (err) {
     return NextResponse.json(
@@ -48,7 +49,7 @@ export async function POST(request: NextRequest) {
   }
 
   if (syncInterval !== undefined) {
-    const valid = ['off', '1h', '4h', '8h', '24h']
+    const valid = ['off', '1h', '4h', '8h', '24h', 'daily']
     if (!valid.includes(syncInterval)) {
       return NextResponse.json({ error: `Invalid interval. Use: ${valid.join(', ')}` }, { status: 400 })
     }

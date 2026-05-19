@@ -23,9 +23,9 @@ App runs at **http://localhost:3000**
 If the user is signed into Claude Code CLI, **Siftly uses their Claude subscription automatically**. No API key configuration required.
 
 How it works:
-- `lib/claude-cli-auth.ts` reads the OAuth token from the macOS keychain (`Claude Code-credentials`)
-- Uses `authToken` + `anthropic-beta: oauth-2025-04-20` header in the Anthropic SDK
-- Falls back to: DB-saved API key → `ANTHROPIC_API_KEY` env var → local proxy
+- Anthropic provider: Claude CLI → saved API key → `ANTHROPIC_API_KEY` → `ANTHROPIC_BASE_URL`
+- OpenAI provider: Codex CLI → saved API key → `OPENAI_API_KEY` → `OPENAI_BASE_URL`
+- Local provider: named endpoints in Settings, or fallback `LOCAL_AI_BASE_URL` + `LOCAL_AI_MODEL` (optional `LOCAL_AI_API_KEY`)
 
 To verify it's working, hit: `GET /api/settings/cli-status`
 

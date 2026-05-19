@@ -1,18 +1,14 @@
 'use client'
 
 import React, { useRef, useEffect, useState } from 'react'
-import { ExternalLink, Download, FileText, Play, Pencil, X, Check, ImageOff, Bookmark, Globe } from 'lucide-react'
+import { ExternalLink, Download, Play, Pencil, X, Check, ImageOff, Bookmark, Globe, Eye, Heart } from 'lucide-react'
 import type { BookmarkWithMedia, Category } from '@/lib/types'
+import { buildMediaCandidates } from '@/lib/media'
 
 // ── URL helpers ────────────────────────────────────────────────────────────────
 
-const URL_REGEX = /https?:\/\/[^\s]+/g
 // Twitter always shortens links to t.co — strip these from display text
 const TCO_REGEX = /https?:\/\/t\.co\/[^\s]+/g
-
-function extractUrls(text: string): string[] {
-  return text.match(URL_REGEX) ?? []
-}
 
 /** Always strip t.co shortlinks — Twitter appends them to every tweet with a link or media */
 function stripTcoUrls(text: string): string {
@@ -33,13 +29,14 @@ interface LinkPreviewData {
 // Module-level cache: url → preview data (or null on error)
 const previewCache = new Map<string, LinkPreviewData | null>()
 
-function LinkPreview({ url, tweetUrl, tweetId, prominent = false }: { url: string; tweetUrl: string; tweetId?: string; prominent?: boolean }) {
-  const [data, setData] = useState<LinkPreviewData | null | 'loading'>('loading')
+function LinkPreview({ url, tweetId, prominent = false }: { url: string; tweetId?: string; prominent?: boolean }) {
+  const cacheKey = tweetId ? `${url}:${tweetId}` : url
+  const [data, setData] = useState<LinkPreviewData | null | 'loading'>(() =>
+    previewCache.has(cacheKey) ? previewCache.get(cacheKey) ?? null : 'loading',
+  )
 
   useEffect(() => {
-    const cacheKey = tweetId ? `${url}:${tweetId}` : url
     if (previewCache.has(cacheKey)) {
-      setData(previewCache.get(cacheKey) ?? null)
       return
     }
     let cancelled = false
@@ -55,7 +52,7 @@ function LinkPreview({ url, tweetUrl, tweetId, prominent = false }: { url: strin
         if (!cancelled) { previewCache.set(cacheKey, null); setData(null) }
       })
     return () => { cancelled = true }
-  }, [url, tweetId])
+  }, [cacheKey, url, tweetId])
 
   if (data === 'loading') {
     return (
@@ -67,7 +64,7 @@ function LinkPreview({ url, tweetUrl, tweetId, prominent = false }: { url: strin
   if (!data) {
     return (
       <a
-        href={tweetUrl}
+        href={url}
         target="_blank"
         rel="noopener noreferrer"
         onClick={(e) => e.stopPropagation()}
@@ -243,6 +240,70 @@ function formatDate(dateStr: string | null): string {
   })
 }
 
+function formatCompactNumber(value: number): string {
+  return new Intl.NumberFormat('en-US', {
+    notation: 'compact',
+    maximumFractionDigits: value >= 10_000 ? 0 : 1,
+  }).format(value)
+}
+
+function MediaImage({
+  sources,
+  alt,
+  className,
+  onAllFailed,
+}: {
+  sources: string[]
+  alt: string
+  className: string
+  onAllFailed?: () => void
+}) {
+  return (
+    <MediaImageInner
+      key={sources.join('||')}
+      sources={sources}
+      alt={alt}
+      className={className}
+      onAllFailed={onAllFailed}
+    />
+  )
+}
+
+function MediaImageInner({
+  sources,
+  alt,
+  className,
+  onAllFailed,
+}: {
+  sources: string[]
+  alt: string
+  className: string
+  onAllFailed?: () => void
+}) {
+  const [sourceIndex, setSourceIndex] = useState(0)
+
+  const src = sources[sourceIndex]
+  if (!src) return null
+
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={src}
+      alt={alt}
+      className={className}
+      loading="lazy"
+      onError={() => {
+        if (sourceIndex < sources.length - 1) {
+          setSourceIndex((current) => current + 1)
+          return
+        }
+
+        onAllFailed?.()
+      }}
+    />
+  )
+}
+
 // ── Author Avatar ──────────────────────────────────────────────────────────────
 
 function AuthorAvatar({ name, handle, avatarUrl }: { name: string; handle: string; avatarUrl?: string | null }) {
@@ -280,27 +341,9 @@ function AuthorAvatar({ name, handle, avatarUrl }: { name: string; handle: strin
 
 // ── Top media slot (no margins — rendered full-bleed at top of card) ────────
 
-function proxyUrl(url: string): string {
-  return `/api/media?url=${encodeURIComponent(url)}`
-}
-
 /** Returns true if the URL points to an actual video file (not a thumbnail JPEG) */
 function isVideoUrl(url: string): boolean {
   return url.includes('video.twimg.com') || url.includes('.mp4')
-}
-
-/** Derive a thumbnail URL from a Twitter video URL */
-function deriveVideoThumb(url: string): string | null {
-  // amplify_video/{id}/vid/... → pbs.twimg.com/amplify_video_thumb/{id}/img/default.jpg
-  const amplify = url.match(/video\.twimg\.com\/amplify_video\/(\d+)/)
-  if (amplify) return `https://pbs.twimg.com/amplify_video_thumb/${amplify[1]}/img/default.jpg`
-  // ext_tw_video/{id}/pu/vid/... → pbs.twimg.com/ext_tw_video_thumb/{id}/pu/img/default.jpg
-  const ext = url.match(/video\.twimg\.com\/ext_tw_video\/(\d+)/)
-  if (ext) return `https://pbs.twimg.com/ext_tw_video_thumb/${ext[1]}/pu/img/default.jpg`
-  // tweet_video/{id}.mp4 → pbs.twimg.com/tweet_video_thumb/{id}.jpg
-  const tweet = url.match(/video\.twimg\.com\/tweet_video\/([^.]+)\.mp4/)
-  if (tweet) return `https://pbs.twimg.com/tweet_video_thumb/${tweet[1]}.jpg`
-  return null
 }
 
 interface TopMediaSlotProps {
@@ -350,13 +393,14 @@ function MediaPlaceholder({ onClick, label, isVideo }: { onClick?: (e: React.Mou
 
 function TopMediaSlot({ item, tweetUrl }: TopMediaSlotProps) {
   const [imgError, setImgError] = useState(false)
+  const photoSources = buildMediaCandidates(item.url, item.thumbnailUrl)
 
   // ── Photo: show inline ─────────────────────────────────────────────────────
   if (item.type === 'photo') {
-    if (imgError) {
+    if (imgError || photoSources.length === 0) {
       return (
         <a href={tweetUrl} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
-          <div className="h-48 flex flex-col items-center justify-center gap-2 bg-zinc-800/50 hover:bg-zinc-800/70 transition-colors">
+          <div className="flex aspect-[16/10] min-h-48 flex-col items-center justify-center gap-2 bg-zinc-800/50 hover:bg-zinc-800/70 transition-colors">
             <ImageOff size={18} className="text-zinc-600" />
             <span className="px-3 py-1.5 rounded-full bg-zinc-700 text-zinc-400 text-xs font-semibold">
               View on X ↗
@@ -366,13 +410,11 @@ function TopMediaSlot({ item, tweetUrl }: TopMediaSlotProps) {
       )
     }
     return (
-      // eslint-disable-next-line @next/next/no-img-element
-      <img
-        src={proxyUrl(item.url)}
+      <MediaImage
+        sources={photoSources}
         alt="Bookmark media"
-        className="w-full h-48 object-cover"
-        loading="lazy"
-        onError={() => setImgError(true)}
+        className="aspect-[16/10] min-h-48 w-full object-cover"
+        onAllFailed={() => setImgError(true)}
       />
     )
   }
@@ -381,19 +423,18 @@ function TopMediaSlot({ item, tweetUrl }: TopMediaSlotProps) {
   // Guard: thumbnailUrl that is itself a video URL is not usable as an <img>
   const rawThumb = item.thumbnailUrl ?? null
   const thumb = rawThumb && !isVideoUrl(rawThumb) ? rawThumb
-    : (!isVideoUrl(item.url) ? item.url : deriveVideoThumb(item.url))
+    : (!isVideoUrl(item.url) ? item.url : null)
+  const thumbnailSources = buildMediaCandidates(thumb)
 
   return (
     <a href={tweetUrl} target="_blank" rel="noopener noreferrer" className="relative block" onClick={(e) => e.stopPropagation()}>
-      {thumb && !imgError ? (
+      {thumbnailSources.length > 0 && !imgError ? (
         <div className="relative">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={proxyUrl(thumb)}
+          <MediaImage
+            sources={thumbnailSources}
             alt=""
-            className="w-full h-48 object-cover"
-            loading="lazy"
-            onError={() => setImgError(true)}
+            className="aspect-[16/10] min-h-48 w-full object-cover"
+            onAllFailed={() => setImgError(true)}
           />
           <MediaOverlay />
         </div>
@@ -440,6 +481,23 @@ function CategoryChip({
           <X size={10} />
         </button>
       )}
+    </span>
+  )
+}
+
+function MetricChip({
+  icon,
+  value,
+  label,
+}: {
+  icon: React.ReactNode
+  value: number
+  label: string
+}) {
+  return (
+    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-zinc-800 bg-zinc-950 text-[11px] font-medium text-zinc-400">
+      {icon}
+      <span>{formatCompactNumber(value)} {label}</span>
     </span>
   )
 }
@@ -520,7 +578,7 @@ function CategoryEditor({ bookmarkId, currentCategoryIds, onSave, onClose }: Cat
   return (
     <div
       ref={editorRef}
-      className="absolute left-0 right-0 bottom-full mb-2 z-50 bg-zinc-900 border border-zinc-700 rounded-xl p-3 shadow-2xl shadow-black/50"
+      className="absolute left-0 right-0 top-full mt-2 z-50 bg-zinc-900 border border-zinc-700 rounded-xl p-3 shadow-2xl shadow-black/50"
       onClick={(e) => e.stopPropagation()}
     >
       <p className="text-xs font-semibold text-zinc-500 mb-2 uppercase tracking-wide">Edit categories</p>
@@ -597,12 +655,16 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
   // Always strip t.co shortlinks from display text — Twitter appends them to every tweet
   const tcoUrls = bookmark.text.match(TCO_REGEX) ?? []
   const cleanText = stripTcoUrls(bookmark.text)
-  // Show link preview only when there's no real media attached
-  const previewUrl = !hasMedia && tcoUrls.length > 0 ? tcoUrls[tcoUrls.length - 1] : null
+  const storedArticleUrl = bookmark.articleUrl?.trim() || null
+  // Prefer resolved article URLs; fall back to t.co links when no media owns the card.
+  const previewUrl = storedArticleUrl ?? (!hasMedia && tcoUrls.length > 0 ? tcoUrls[tcoUrls.length - 1] : null)
 
   const TEXT_LIMIT = 280
   const isLong = cleanText.length > TEXT_LIMIT
   const displayText = expanded || !isLong ? cleanText : cleanText.slice(0, TEXT_LIMIT)
+  const likes = bookmark.engagement?.likes ?? null
+  const views = bookmark.engagement?.views ?? null
+  const sourceLabel = bookmark.source === 'like' ? 'Liked' : 'Saved'
 
   const currentCategoryIds = new Set(categories.map((c) => c.id))
 
@@ -639,76 +701,22 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
     document.body.removeChild(a)
   }
 
-  function handleDownloadMarkdown() {
-    const lines: string[] = []
-
-    // Header
-    if (isKnownAuthor) {
-      lines.push(`# Tweet by @${bookmark.authorHandle}`)
-      lines.push('')
-      lines.push(`**Author:** ${bookmark.authorName} (@${bookmark.authorHandle})`)
-    } else {
-      lines.push(`# Bookmarked Tweet`)
-    }
-    if (dateStr) lines.push(`**Date:** ${dateStr}`)
-    lines.push(`**URL:** ${tweetUrl}`)
-    if (categories.length > 0) {
-      lines.push(`**Categories:** ${categories.map((c) => c.name).join(', ')}`)
-    }
-    lines.push('')
-    lines.push('---')
-    lines.push('')
-
-    // Full stored text — keep URLs so truncated threads show the continuation link
-    if (bookmark.text) lines.push(bookmark.text)
-
-    // If text ends with a t.co link the tweet may be part of a longer thread
-    if (TCO_REGEX.test(bookmark.text)) {
-      lines.push('')
-      lines.push(`> *This tweet may be part of a longer thread. [Read on X ↗](${tweetUrl})*`)
-    }
-
-    // Media
-    if (bookmark.mediaItems.length > 0) {
-      lines.push('')
-      lines.push('---')
-      lines.push('')
-      for (const m of bookmark.mediaItems) {
-        if (m.type === 'photo') {
-          lines.push(`![Image](${m.url})`)
-        } else {
-          lines.push(`[${m.type === 'video' ? 'Video' : 'GIF'} — view on X](${tweetUrl})`)
-        }
-      }
-    }
-
-    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `tweet-${bookmark.tweetId}.md`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-  }
-
   // Only show download if media is a photo or a real video (not a thumbnail JPEG stored as video)
   const isDownloadable = firstMedia !== null &&
     (firstMedia.type === 'photo' || isVideoUrl(firstMedia.url))
 
   return (
-    <div className="group relative bg-zinc-900 border border-zinc-800 rounded-2xl hover:border-zinc-700 hover:shadow-xl hover:shadow-black/30 transition-all duration-200 flex flex-col flex-1">
+    <div className="group relative flex h-full flex-col overflow-hidden rounded-[24px] border border-zinc-800/80 bg-[linear-gradient(180deg,rgba(24,24,27,0.96),rgba(10,10,12,0.96))] shadow-[0_12px_40px_rgba(0,0,0,0.22)] transition-all duration-200 hover:-translate-y-0.5 hover:border-zinc-700 hover:shadow-[0_18px_48px_rgba(0,0,0,0.3)]">
 
       {/* Top media — full bleed, no padding */}
       {firstMedia && (
-        <div className="border-b border-zinc-800/60 rounded-t-2xl overflow-hidden shrink-0">
+        <div className="border-b border-zinc-800/60 flex-shrink-0 bg-zinc-950/60">
           <TopMediaSlot item={firstMedia} tweetUrl={tweetUrl} />
         </div>
       )}
 
       {/* Card body */}
-      <div className="p-4 flex flex-col flex-1">
+      <div className="flex flex-1 flex-col p-4">
 
         {/* Author row + hover actions */}
         <div className="flex items-start justify-between gap-2 mb-3">
@@ -722,21 +730,16 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
                   {bookmark.authorName}
                 </p>
               )}
-              <p className="text-xs text-zinc-500 truncate">
-                {isKnownAuthor ? `@${bookmark.authorHandle}` : dateStr}
+              <p className="flex items-center gap-1.5 text-xs text-zinc-500 truncate">
+                <span>{isKnownAuthor ? `@${bookmark.authorHandle}` : sourceLabel}</span>
+                <span className="h-1 w-1 rounded-full bg-zinc-700" />
+                <span>{sourceLabel}</span>
               </p>
             </div>
           </div>
 
           {/* Actions — visible on hover */}
-          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5">
-            <button
-              onClick={handleDownloadMarkdown}
-              className="p-1.5 rounded-lg text-zinc-600 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
-              title="Download as Markdown"
-            >
-              <FileText size={13} />
-            </button>
+          <div className="mt-0.5 flex flex-shrink-0 items-center gap-0.5 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
             {isDownloadable && (
               <button
                 onClick={handleDownload}
@@ -759,9 +762,9 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
         </div>
 
         {/* Tweet text */}
-        <div className={`flex-1 ${previewUrl && !displayText ? '' : 'min-h-[4.5rem]'}`}>
+        <div className={`flex-1 ${previewUrl && !displayText ? '' : 'min-h-[5.25rem]'}`}>
           {displayText.length > 0 && (
-            <p className="text-sm text-zinc-200 leading-relaxed">
+            <p className="text-sm text-zinc-200 leading-[1.7]">
               {displayText}
               {isLong && !expanded && (
                 <span>
@@ -791,9 +794,28 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
             <p className="text-xs text-zinc-700 italic">No text content</p>
           )}
           {previewUrl && (
-            <LinkPreview url={previewUrl} tweetUrl={tweetUrl} tweetId={bookmark.tweetId} prominent={!displayText} />
+            <LinkPreview key={previewUrl} url={previewUrl} tweetId={bookmark.tweetId} prominent={!displayText} />
           )}
         </div>
+
+        {(views != null || likes != null) && (
+          <div className="mt-3 flex items-center gap-2 flex-wrap">
+            {views != null && (
+              <MetricChip
+                icon={<Eye size={11} className="text-zinc-500" />}
+                value={views}
+                label="views"
+              />
+            )}
+            {likes != null && (
+              <MetricChip
+                icon={<Heart size={11} className="text-zinc-500" />}
+                value={likes}
+                label="likes"
+              />
+            )}
+          </div>
+        )}
 
         {/* Footer: categories + meta — fixed two-row structure keeps all cards aligned */}
         <div className="relative mt-auto pt-3 border-t border-zinc-800/50">
@@ -805,7 +827,7 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
             {categories.length === 0 && (
               <span className="text-xs text-zinc-700 italic">Uncategorized</span>
             )}
-            {isKnownAuthor && dateStr && (
+            {dateStr && (
               <span className="ml-auto text-xs text-zinc-600 flex-shrink-0">
                 {dateStr}
               </span>
