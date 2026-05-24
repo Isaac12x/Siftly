@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Speed up import planning, semantic enrichment, and AI category discovery for large bookmark libraries.
 - Improve bookmark, category, import, settings, categorization, search, and mindmap flows.
 - Update Prisma schema for article content storage.
 - Rename Next middleware entry point to proxy.

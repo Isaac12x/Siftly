@@ -275,21 +275,36 @@ export async function analyzeUntaggedImages(client: AIClient, limit = 10): Promi
  * Analyze ALL untagged media items (no limit). Used during full AI categorization.
  */
 export async function analyzeAllUntagged(
-  client: AIClient,
+  client: AIClient | null,
   onProgress?: (total: number) => void,
   shouldAbort?: () => boolean,
+): Promise<number> {
+  return analyzeUntaggedImagesForBookmarks(client, { onProgress, shouldAbort })
+}
+
+export async function analyzeUntaggedImagesForBookmarks(
+  client: AIClient | null,
+  options: {
+    bookmarkIds?: string[]
+    onProgress?: (total: number) => void
+    shouldAbort?: () => boolean
+  } = {},
 ): Promise<number> {
   const CHUNK = 15
   let total = 0
   let cursor: string | undefined
+  const bookmarkWhere = options.bookmarkIds?.length
+    ? { bookmarkId: { in: options.bookmarkIds } }
+    : {}
 
   while (true) {
-    if (shouldAbort?.()) break
+    if (options.shouldAbort?.()) break
 
     // Use cursor-based pagination so failed items (marked '{}') are skipped naturally,
     // and we never re-fetch items we already attempted this run.
     const untagged = await prisma.mediaItem.findMany({
       where: {
+        ...bookmarkWhere,
         type: { in: ['photo', 'gif', 'video'] },
         // Only fetch items that have never been attempted (null) — '{}' sentinel means already tried
         imageTags: null,
@@ -306,8 +321,8 @@ export async function analyzeAllUntagged(
 
     await analyzeBatch(untagged, client, (delta) => {
       total += delta
-      onProgress?.(total)
-    }, shouldAbort)
+      options.onProgress?.(total)
+    }, options.shouldAbort)
 
     if (untagged.length < CHUNK) break
   }
@@ -340,6 +355,50 @@ export interface EnrichmentResult {
   sentiment: string
   people: string[]
   companies: string[]
+}
+
+interface BookmarkEnrichmentRow {
+  id: string
+  text: string
+  articleContent: string | null
+  entities: string | null
+  mediaItems: { imageTags: string | null }[]
+}
+
+export interface EnrichmentTargetPlan {
+  trivialIds: string[]
+  targets: BookmarkForEnrichment[]
+}
+
+export function planEnrichmentTargets(rows: BookmarkEnrichmentRow[]): EnrichmentTargetPlan {
+  const trivialIds: string[] = []
+  const targets: BookmarkForEnrichment[] = []
+
+  for (const b of rows) {
+    const imageTags = b.mediaItems
+      .map((m) => m.imageTags)
+      .filter((t): t is string => t !== null && t !== '' && t !== '{}')
+
+    if (imageTags.length === 0 && b.text.length < 20 && !b.articleContent) {
+      trivialIds.push(b.id)
+      continue
+    }
+
+    let entities: BookmarkForEnrichment['entities'] = undefined
+    if (b.entities) {
+      try { entities = JSON.parse(b.entities) as typeof entities } catch { /* ignore */ }
+    }
+
+    targets.push({
+      id: b.id,
+      text: b.text,
+      articleContent: b.articleContent,
+      imageTags,
+      entities,
+    })
+  }
+
+  return { trivialIds, targets }
 }
 
 function buildEnrichmentPrompt(bookmarks: BookmarkForEnrichment[]): string {
@@ -457,19 +516,36 @@ export async function enrichBatchSemanticTags(
  * with ENRICH_CONCURRENCY parallel batches — 5-10x fewer API calls vs. per-bookmark.
  */
 export async function enrichAllBookmarks(
-  client: AIClient,
+  client: AIClient | null,
   onProgress?: (total: number) => void,
   shouldAbort?: () => boolean,
 ): Promise<number> {
+  return enrichBookmarks(client, { onProgress, shouldAbort })
+}
+
+export async function enrichBookmarks(
+  client: AIClient | null,
+  options: {
+    bookmarkIds?: string[]
+    onProgress?: (total: number) => void
+    onSkipped?: (total: number) => void
+    shouldAbort?: () => boolean
+  } = {},
+): Promise<number> {
   const CHUNK = ENRICH_BATCH_SIZE * ENRICH_CONCURRENCY * 2 // fetch ahead of processing
   let enriched = 0
+  let skipped = 0
   let cursor: string | undefined
+  const bookmarkWhere = options.bookmarkIds?.length
+    ? { id: { in: options.bookmarkIds } }
+    : {}
 
   while (true) {
-    if (shouldAbort?.()) break
+    if (options.shouldAbort?.()) break
 
     const rows = await prisma.bookmark.findMany({
       where: {
+        ...bookmarkWhere,
         semanticTags: null,
         ...(cursor ? { id: { gt: cursor } } : {}),
       },
@@ -487,27 +563,7 @@ export async function enrichAllBookmarks(
     if (rows.length === 0) break
     cursor = rows[rows.length - 1].id
 
-    // Separate bookmarks worth enriching from trivial ones (mark trivial immediately)
-    const trivialIds: string[] = []
-    const toEnrich: BookmarkForEnrichment[] = []
-
-    for (const b of rows) {
-      const imageTags = b.mediaItems
-        .map((m) => m.imageTags)
-        .filter((t): t is string => t !== null && t !== '' && t !== '{}')
-
-      if (imageTags.length === 0 && b.text.length < 20 && !b.articleContent) {
-        trivialIds.push(b.id)
-        continue
-      }
-
-      let entities: BookmarkForEnrichment['entities'] = undefined
-      if (b.entities) {
-        try { entities = JSON.parse(b.entities) as typeof entities } catch { /* ignore */ }
-      }
-
-      toEnrich.push({ id: b.id, text: b.text, articleContent: b.articleContent, imageTags, entities })
-    }
+    const { trivialIds, targets } = planEnrichmentTargets(rows)
 
     // Mark trivial bookmarks in one batch
     if (trivialIds.length > 0) {
@@ -515,39 +571,48 @@ export async function enrichAllBookmarks(
         where: { id: { in: trivialIds } },
         data: { semanticTags: '[]' },
       })
+      skipped += trivialIds.length
+      options.onSkipped?.(skipped)
     }
 
     // Split into batches and process with concurrency
     const batches: BookmarkForEnrichment[][] = []
-    for (let i = 0; i < toEnrich.length; i += ENRICH_BATCH_SIZE) {
-      batches.push(toEnrich.slice(i, i + ENRICH_BATCH_SIZE))
+    for (let i = 0; i < targets.length; i += ENRICH_BATCH_SIZE) {
+      batches.push(targets.slice(i, i + ENRICH_BATCH_SIZE))
     }
 
     const batchTasks = batches.map((batch) => async () => {
-      if (shouldAbort?.()) return
+      if (options.shouldAbort?.()) return
 
       const results = await enrichBatchSemanticTags(batch, client)
       const resultMap = new Map(results.map((r) => [r.id, r]))
+      const updates: ReturnType<typeof prisma.bookmark.update>[] = []
 
       for (const b of batch) {
         const result = resultMap.get(b.id)
         if (result?.tags.length) {
-          await prisma.bookmark.update({
-            where: { id: b.id },
-            data: {
-              semanticTags: JSON.stringify(result.tags),
-              enrichmentMeta: JSON.stringify({
-                sentiment: result.sentiment,
-                people: result.people,
-                companies: result.companies,
-              }),
-            },
-          })
-          enriched++
-          onProgress?.(enriched)
+          updates.push(
+            prisma.bookmark.update({
+              where: { id: b.id },
+              data: {
+                semanticTags: JSON.stringify(result.tags),
+                enrichmentMeta: JSON.stringify({
+                  sentiment: result.sentiment,
+                  people: result.people,
+                  companies: result.companies,
+                }),
+              },
+            }),
+          )
         }
         // Don't mark failed enrichments as '[]' — leave semanticTags: null so
         // they are retried on the next pipeline run without needing force=true.
+      }
+
+      if (updates.length > 0) {
+        await prisma.$transaction(updates)
+        enriched += updates.length
+        options.onProgress?.(enriched)
       }
     })
 

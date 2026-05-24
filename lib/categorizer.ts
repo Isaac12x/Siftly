@@ -9,6 +9,7 @@ const BATCH_SIZE = 20
 const CATEGORIZATION_MIN_TOKENS = 2_048
 const CATEGORIZATION_MAX_TOKENS = 8_192
 const TAXONOMY_BATCH_SIZE = 80
+const TAXONOMY_DISCOVERY_BOOKMARK_LIMIT = 480
 const TAXONOMY_CANDIDATE_LIMIT = 120
 const TAXONOMY_MAX_CATEGORIES = 32
 const TAXONOMY_MAX_TOKENS = 6_144
@@ -552,6 +553,26 @@ BOOKMARKS:
 ${JSON.stringify(bookmarkData, null, 1)}`
 }
 
+export function planTaxonomyDiscoveryBatches(total: number): Array<{ skip: number; take: number }> {
+  if (total <= 0) return []
+
+  if (total <= TAXONOMY_DISCOVERY_BOOKMARK_LIMIT) {
+    const batches: Array<{ skip: number; take: number }> = []
+    for (let skip = 0; skip < total; skip += TAXONOMY_BATCH_SIZE) {
+      batches.push({ skip, take: Math.min(TAXONOMY_BATCH_SIZE, total - skip) })
+    }
+    return batches
+  }
+
+  const batchCount = Math.ceil(TAXONOMY_DISCOVERY_BOOKMARK_LIMIT / TAXONOMY_BATCH_SIZE)
+  const maxSkip = Math.max(0, total - TAXONOMY_BATCH_SIZE)
+
+  return Array.from({ length: batchCount }, (_, index) => ({
+    skip: Math.floor((maxSkip * index) / Math.max(1, batchCount - 1)),
+    take: TAXONOMY_BATCH_SIZE,
+  }))
+}
+
 function buildCategoryConsolidationPrompt(candidates: DiscoveredCategory[]): string {
   return `Consolidate these candidate bookmark collections into a final taxonomy.
 
@@ -613,7 +634,10 @@ async function requestTextCompletion(
   return response.text
 }
 
-async function persistDiscoveredCategories(categories: DiscoveredCategory[]): Promise<DiscoveredCategory[]> {
+async function persistDiscoveredCategories(
+  categories: DiscoveredCategory[],
+  options: { pruneMissing?: boolean } = {},
+): Promise<DiscoveredCategory[]> {
   const slugs = categories.map((category) => category.slug)
   const existing = await prisma.category.findMany({
     where: { slug: { in: slugs } },
@@ -643,15 +667,21 @@ async function persistDiscoveredCategories(categories: DiscoveredCategory[]): Pr
     })
   })
 
-  await prisma.$transaction([
-    prisma.category.deleteMany({
-      where: {
-        isAiGenerated: true,
-        slug: { notIn: slugs },
-      },
-    }),
-    ...writeOps,
-  ])
+  const ops = options.pruneMissing === false
+    ? writeOps
+    : [
+        prisma.category.deleteMany({
+          where: {
+            isAiGenerated: true,
+            slug: { notIn: slugs },
+          },
+        }),
+        ...writeOps,
+      ]
+
+  if (ops.length > 0) {
+    await prisma.$transaction(ops)
+  }
 
   return categories
 }
@@ -666,27 +696,29 @@ export async function discoverCategoriesFromBookmarks(
 ): Promise<DiscoveredCategory[]> {
   const bookmarkWhere = options.bookmarkIds?.length ? { id: { in: options.bookmarkIds } } : {}
   const total = await prisma.bookmark.count({ where: bookmarkWhere })
+  const pruneMissing = !options.bookmarkIds?.length && total <= TAXONOMY_DISCOVERY_BOOKMARK_LIMIT
   if (total === 0) {
-    await persistDiscoveredCategories([])
+    await persistDiscoveredCategories([], { pruneMissing })
     return []
   }
 
   const candidates: DiscoveredCategory[] = []
   let done = 0
-  let cursor: string | undefined
+  const batches = planTaxonomyDiscoveryBatches(total)
+  const plannedTotal = batches.reduce((sum, batch) => sum + batch.take, 0)
 
-  while (true) {
+  for (const batchPlan of batches) {
     if (options.shouldAbort?.()) break
 
     const rows = await prisma.bookmark.findMany({
-      where: { ...bookmarkWhere, ...(cursor ? { id: { gt: cursor } } : {}) },
+      where: bookmarkWhere,
       orderBy: { id: 'asc' },
-      take: TAXONOMY_BATCH_SIZE,
+      skip: batchPlan.skip,
+      take: batchPlan.take,
       select: BOOKMARK_SELECT,
     })
 
     if (rows.length === 0) break
-    cursor = rows[rows.length - 1].id
 
     try {
       const prompt = buildCategoryDiscoveryPrompt(rows.map(mapBookmarkForCategorization))
@@ -700,13 +732,12 @@ export async function discoverCategoriesFromBookmarks(
     }
 
     done += rows.length
-    options.onProgress?.(Math.min(done, total), total)
-    if (rows.length < TAXONOMY_BATCH_SIZE) break
+    options.onProgress?.(Math.min(done, plannedTotal), plannedTotal)
   }
 
   if (options.shouldAbort?.()) return []
   if (candidates.length === 0) {
-    await persistDiscoveredCategories([])
+    await persistDiscoveredCategories([], { pruneMissing })
     return []
   }
 
@@ -721,7 +752,7 @@ export async function discoverCategoriesFromBookmarks(
     discovered = parseDiscoveredCategories(response)
   }
 
-  return persistDiscoveredCategories(discovered)
+  return persistDiscoveredCategories(discovered, { pruneMissing })
 }
 
 async function requestCategorizationBatch(

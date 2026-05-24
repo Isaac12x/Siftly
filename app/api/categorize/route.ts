@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
 import { AIClient, resolveAIClient } from '@/lib/ai-client'
-import { getActiveModel, getApiKeySettingKey, getProvider, getWebhookUrl } from '@/lib/settings'
+import { getApiKeySettingKey, getProvider, getWebhookUrl } from '@/lib/settings'
 import {
   seedDefaultCategories,
   categorizeBatch,
@@ -11,10 +11,8 @@ import {
   BOOKMARK_SELECT,
 } from '@/lib/categorizer'
 import {
-  analyzeItem,
-  runWithConcurrency,
-  enrichBatchSemanticTags,
-  BookmarkForEnrichment,
+  analyzeUntaggedImagesForBookmarks,
+  enrichBookmarks,
 } from '@/lib/vision-analyzer'
 import { backfillEntities } from '@/lib/rawjson-extractor'
 import { backfillArticleContent } from '@/lib/article-extractor'
@@ -107,9 +105,7 @@ export async function DELETE(): Promise<NextResponse> {
   return NextResponse.json({ stopped: true })
 }
 
-const PIPELINE_WORKERS = 5
 const CAT_BATCH_SIZE = 12
-const LOCAL_PIPELINE_WORKERS = 1
 const LOCAL_CAT_BATCH_SIZE = 5
 const ERROR_MESSAGE_LIMIT = 1_200
 
@@ -205,7 +201,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   })
 
   const provider = await getProvider()
-  const pipelineWorkerCount = provider === 'local' ? LOCAL_PIPELINE_WORKERS : PIPELINE_WORKERS
   const categoryBatchSize = provider === 'local' ? LOCAL_CAT_BATCH_SIZE : CAT_BATCH_SIZE
   const keyName = getApiKeySettingKey(provider)
   const dbApiKey =
@@ -274,111 +269,42 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           }
         }
 
-        // Stage 2: Parallel vision + enrichment. Categorization waits until taxonomy discovery is complete.
+        // Stage 2: Bulk vision + semantic enrichment. Categorization waits until taxonomy discovery is complete.
         if (!shouldAbort() && bookmarkIdsToProcess.length > 0) {
 
           const runTotal = bookmarkIdsToProcess.length
           setState({ stage: 'parallel', done: 0, total: runTotal, stageCounts: { ...counts } })
 
-          const model = await getActiveModel()
-          let processedCount = 0
+          counts.visionTagged = await analyzeUntaggedImagesForBookmarks(client, {
+            bookmarkIds: bookmarkIdsToProcess,
+            shouldAbort,
+            onProgress: (attempted) => {
+              counts.visionTagged = attempted
+              setState({ stageCounts: { ...counts } })
+            },
+          })
+          setState({ stageCounts: { ...counts } })
 
-          async function processBookmark(bookmarkId: string): Promise<void> {
-            if (shouldAbort()) return
-
-            const bm = await prisma.bookmark.findUnique({
-              where: { id: bookmarkId },
-              select: {
-                id: true,
-                text: true,
-                semanticTags: true,
-                entities: true,
-                mediaItems: {
-                  where: { type: { in: ['photo', 'gif', 'video'] } },
-                  select: { id: true, url: true, thumbnailUrl: true, type: true, imageTags: true },
-                },
-              },
-            })
-            if (!bm) return
-
-            // Vision: analyze any untagged media items (SDK or CLI)
-            let anyVisionRan = false
-            for (const media of bm.mediaItems) {
-              if (shouldAbort()) return
-              if (media.imageTags !== null) continue
-              try {
-                await analyzeItem(
-                  { id: media.id, url: media.url, thumbnailUrl: media.thumbnailUrl, type: media.type },
-                  client,
-                  model,
-                )
-                anyVisionRan = true
-                counts.visionTagged++
-                setState({ stageCounts: { ...counts } })
-              } catch (err) {
-                console.warn('[parallel] vision failed for', media.id, err instanceof Error ? err.message : err)
-              }
-            }
-
-            // Enrichment: generate semantic tags if not already done
-            if (!bm.semanticTags) {
-              // Re-fetch image tags from DB after vision (or use initial fetch if no vision ran)
-              const imageTags = anyVisionRan
-                ? (
-                    await prisma.mediaItem.findMany({
-                      where: { bookmarkId: bm.id, type: { in: ['photo', 'gif', 'video'] } },
-                      select: { imageTags: true },
-                    })
-                  )
-                    .map((m) => m.imageTags)
-                    .filter((t): t is string => t !== null && t !== '' && t !== '{}')
-                : bm.mediaItems
-                    .map((m) => m.imageTags)
-                    .filter((t): t is string => t !== null && t !== '' && t !== '{}')
-
-              if (imageTags.length === 0 && bm.text.length < 20) {
-                // Trivial bookmark — skip enrichment
-                await prisma.bookmark.update({ where: { id: bm.id }, data: { semanticTags: '[]' } })
-              } else {
-                let entities: BookmarkForEnrichment['entities'] = undefined
-                if (bm.entities) {
-                  try {
-                    entities = JSON.parse(bm.entities) as BookmarkForEnrichment['entities']
-                  } catch { /* ignore */ }
-                }
-                try {
-                  const results = await enrichBatchSemanticTags(
-                    [{ id: bm.id, text: bm.text, imageTags, entities }],
-                    client,
-                  )
-                  const result = results[0]
-                  if (result?.tags.length) {
-                    await prisma.bookmark.update({
-                      where: { id: bm.id },
-                      data: {
-                        semanticTags: JSON.stringify(result.tags),
-                        enrichmentMeta: JSON.stringify({
-                          sentiment: result.sentiment,
-                          people: result.people,
-                          companies: result.companies,
-                        }),
-                      },
-                    })
-                    counts.enriched++
-                    setState({ stageCounts: { ...counts } })
-                  }
-                } catch (err) {
-                  console.warn('[parallel] enrichment failed for', bm.id, err instanceof Error ? err.message : err)
-                }
-              }
-            }
-
-            processedCount++
-            setState({ done: processedCount, stageCounts: { ...counts } })
-          }
-
-          const tasks = bookmarkIdsToProcess.map((id) => () => processBookmark(id))
-          await runWithConcurrency(tasks, pipelineWorkerCount)
+          let skippedEnrichment = 0
+          counts.enriched = await enrichBookmarks(client, {
+            bookmarkIds: bookmarkIdsToProcess,
+            shouldAbort,
+            onProgress: (enriched) => {
+              counts.enriched = enriched
+              setState({
+                done: Math.min(runTotal, enriched + skippedEnrichment),
+                stageCounts: { ...counts },
+              })
+            },
+            onSkipped: (skipped) => {
+              skippedEnrichment = skipped
+              setState({
+                done: Math.min(runTotal, counts.enriched + skippedEnrichment),
+                stageCounts: { ...counts },
+              })
+            },
+          })
+          setState({ done: runTotal, stageCounts: { ...counts } })
         }
 
         // Stage 3: Discover generated collections from the actual bookmark corpus.

@@ -1,12 +1,40 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
-import { parseBookmarksJson } from '@/lib/parser'
+import { parseBookmarksJson, type ParsedBookmark } from '@/lib/parser'
+import { mapWithConcurrency, planImportBookmarks } from '@/lib/import-optimizer'
 import {
+  type ArticleImportFields,
   buildArticleImportFields,
   extractArticleUrlsFromRawJson,
   extractEmbeddedArticleContentFromRawJson,
   fetchFirstArticleContent,
 } from '@/lib/article-extractor'
+
+const IMPORT_PREPARE_CONCURRENCY = 6
+const IMPORT_PREPARE_CHUNK_SIZE = 100
+
+interface PreparedBookmarkImport {
+  bookmark: ParsedBookmark
+  articleFields: ArticleImportFields
+}
+
+async function prepareBookmarkImport(bookmark: ParsedBookmark): Promise<PreparedBookmarkImport> {
+  const articleUrls = Array.from(new Set([
+    bookmark.articleUrl,
+    ...bookmark.urls,
+    ...extractArticleUrlsFromRawJson(bookmark.rawJson),
+  ].filter((url): url is string => Boolean(url))))
+  const existingArticle = bookmark.articleContent
+    ? { url: bookmark.articleUrl ?? articleUrls[0] ?? '', content: bookmark.articleContent }
+    : null
+  const embeddedArticle = extractEmbeddedArticleContentFromRawJson(bookmark.rawJson)
+  const article = existingArticle ?? embeddedArticle ?? await fetchFirstArticleContent(articleUrls)
+
+  return {
+    bookmark,
+    articleFields: buildArticleImportFields(articleUrls, article),
+  }
+}
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   let formData: FormData
@@ -45,7 +73,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     },
   })
 
-  let parsedBookmarks
+  let parsedBookmarks: ParsedBookmark[]
   try {
     parsedBookmarks = parseBookmarksJson(jsonString)
   } catch (err) {
@@ -78,63 +106,60 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   })
 
   let importedCount = 0
-  let skippedCount = 0
   let failedCount = 0
   let firstError: string | null = null
 
-  for (const bookmark of parsedBookmarks) {
-    try {
-      const existing = await prisma.bookmark.findUnique({
-        where: { tweetId: bookmark.tweetId },
-        select: { id: true },
+  const tweetIds = Array.from(new Set(parsedBookmarks.map((bookmark) => bookmark.tweetId)))
+  const existingBookmarks = tweetIds.length > 0
+    ? await prisma.bookmark.findMany({
+        where: { tweetId: { in: tweetIds } },
+        select: { tweetId: true },
       })
+    : []
+  const importPlan = planImportBookmarks(
+    parsedBookmarks,
+    new Set(existingBookmarks.map((bookmark) => bookmark.tweetId)),
+  )
+  const skippedCount = importPlan.skippedCount
+  for (let index = 0; index < importPlan.bookmarks.length; index += IMPORT_PREPARE_CHUNK_SIZE) {
+    const preparedBookmarks = await mapWithConcurrency(
+      importPlan.bookmarks.slice(index, index + IMPORT_PREPARE_CHUNK_SIZE),
+      IMPORT_PREPARE_CONCURRENCY,
+      (bookmark) => prepareBookmarkImport(bookmark),
+    )
 
-      if (existing) {
-        skippedCount++
-        continue
-      }
-
-      const articleUrls = Array.from(new Set([
-        bookmark.articleUrl,
-        ...bookmark.urls,
-        ...extractArticleUrlsFromRawJson(bookmark.rawJson),
-      ].filter((url): url is string => Boolean(url))))
-      const existingArticle = bookmark.articleContent
-        ? { url: bookmark.articleUrl ?? articleUrls[0] ?? '', content: bookmark.articleContent }
-        : null
-      const embeddedArticle = extractEmbeddedArticleContentFromRawJson(bookmark.rawJson)
-      const article = existingArticle ?? embeddedArticle ?? await fetchFirstArticleContent(articleUrls)
-      const articleFields = buildArticleImportFields(articleUrls, article)
-
-      const created = await prisma.bookmark.create({
-        data: {
-          tweetId: bookmark.tweetId,
-          text: bookmark.text,
-          authorHandle: bookmark.authorHandle,
-          authorName: bookmark.authorName,
-          tweetCreatedAt: bookmark.tweetCreatedAt,
-          rawJson: bookmark.rawJson,
-          ...articleFields,
-          source,
-        },
-      })
-
-      if (bookmark.media.length > 0) {
-        await prisma.mediaItem.createMany({
-          data: bookmark.media.map((m) => ({
-            bookmarkId: created.id,
-            type: m.type,
-            url: m.url,
-            thumbnailUrl: m.thumbnailUrl ?? null,
-          })),
+    for (const { bookmark, articleFields } of preparedBookmarks) {
+      try {
+        await prisma.bookmark.create({
+          data: {
+            tweetId: bookmark.tweetId,
+            text: bookmark.text,
+            authorHandle: bookmark.authorHandle,
+            authorName: bookmark.authorName,
+            tweetCreatedAt: bookmark.tweetCreatedAt,
+            rawJson: bookmark.rawJson,
+            ...articleFields,
+            source,
+            ...(bookmark.media.length > 0
+              ? {
+                  mediaItems: {
+                    create: bookmark.media.map((m) => ({
+                      type: m.type,
+                      url: m.url,
+                      thumbnailUrl: m.thumbnailUrl ?? null,
+                    })),
+                  },
+                }
+              : {}),
+          },
         })
-      }
 
-      importedCount++
-    } catch (err) {
-      console.error(`Failed to import tweet ${bookmark.tweetId}:`, err)
-      failedCount++
-      firstError ??= err instanceof Error ? err.message : String(err)
+        importedCount++
+      } catch (err) {
+        console.error(`Failed to import tweet ${bookmark.tweetId}:`, err)
+        failedCount++
+        firstError ??= err instanceof Error ? err.message : String(err)
+      }
     }
   }
 
