@@ -229,6 +229,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         type: m.type,
         url: m.url,
         thumbnailUrl: m.thumbnailUrl,
+        localPath: m.localPath,
       })),
       categories: bookmark.categories.map((bc) => ({
         id: bc.category.id,

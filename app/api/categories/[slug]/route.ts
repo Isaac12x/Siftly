@@ -93,6 +93,7 @@ export async function GET(request: NextRequest, context: RouteContext): Promise<
         type: m.type,
         url: m.url,
         thumbnailUrl: m.thumbnailUrl,
+        localPath: m.localPath,
       })),
       categories: bookmark.categories.map((bc) => ({
         id: bc.category.id,

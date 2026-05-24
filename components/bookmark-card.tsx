@@ -393,7 +393,7 @@ function MediaPlaceholder({ onClick, label, isVideo }: { onClick?: (e: React.Mou
 
 function TopMediaSlot({ item, tweetUrl }: TopMediaSlotProps) {
   const [imgError, setImgError] = useState(false)
-  const photoSources = buildMediaCandidates(item.url, item.thumbnailUrl)
+  const photoSources = buildMediaCandidates(item.localPath, item.url, item.thumbnailUrl)
 
   // ── Photo: show inline ─────────────────────────────────────────────────────
   if (item.type === 'photo') {
@@ -419,12 +419,29 @@ function TopMediaSlot({ item, tweetUrl }: TopMediaSlotProps) {
     )
   }
 
-  // ── Video/GIF: always redirect to tweet — can't play locally ──────────────
+  // ── Video/GIF: play cached media when available; otherwise redirect to tweet
   // Guard: thumbnailUrl that is itself a video URL is not usable as an <img>
   const rawThumb = item.thumbnailUrl ?? null
   const thumb = rawThumb && !isVideoUrl(rawThumb) ? rawThumb
     : (!isVideoUrl(item.url) ? item.url : null)
   const thumbnailSources = buildMediaCandidates(thumb)
+  const poster = thumbnailSources[0]
+
+  if (!imgError && item.localPath && isVideoUrl(item.localPath)) {
+    return (
+      <video
+        src={item.localPath}
+        poster={poster}
+        controls
+        playsInline
+        preload="metadata"
+        loop={item.type === 'gif'}
+        muted={item.type === 'gif'}
+        className="aspect-[16/10] min-h-48 w-full bg-black object-cover"
+        onError={() => setImgError(true)}
+      />
+    )
+  }
 
   return (
     <a href={tweetUrl} target="_blank" rel="noopener noreferrer" className="relative block" onClick={(e) => e.stopPropagation()}>
@@ -694,7 +711,7 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
   function handleDownload() {
     if (!firstMedia) return
     const a = document.createElement('a')
-    a.href = `/api/media?url=${encodeURIComponent(firstMedia.url)}&download=1`
+    a.href = firstMedia.localPath || `/api/media?url=${encodeURIComponent(firstMedia.url)}&download=1`
     a.download = ''
     document.body.appendChild(a)
     a.click()

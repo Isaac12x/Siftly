@@ -127,7 +127,7 @@ async function getCategoryTweetNodes(categorySlug: string): Promise<MindMapRespo
           tweetCreatedAt: true,
           semanticTags: true,
           mediaItems: {
-            select: { url: true, thumbnailUrl: true, type: true, imageTags: true },
+            select: { url: true, thumbnailUrl: true, localPath: true, type: true, imageTags: true },
             take: 1,
           },
         },
@@ -149,7 +149,9 @@ async function getCategoryTweetNodes(categorySlug: string): Promise<MindMapRespo
         : bookmark.text
 
     const firstMedia = bookmark.mediaItems[0] ?? null
-    const thumbnailUrl = firstMedia?.thumbnailUrl ?? (firstMedia?.type === 'photo' ? firstMedia.url : null) ?? null
+    const thumbnailUrl = firstMedia?.type === 'photo'
+      ? (firstMedia.localPath ?? firstMedia.thumbnailUrl ?? firstMedia.url)
+      : (firstMedia?.thumbnailUrl ?? null)
 
     // Extract a brief visual summary from structured imageTags for tooltip
     let visualSummary: string | null = null

@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Add X OAuth import endpoints, live bookmark import support, and related settings flows.
 - Add article extraction, extracted content export, engagement helpers, and media utilities.
 - Add local AI endpoint discovery and settings support.
+- Add import-time caching for bookmark images and videos.
 - Add paged item helpers, instrumentation entry points, and launchd startup script.
 - Add test coverage for article extraction, category discovery, import routing, pagination, and parsing.
 

@@ -5,6 +5,7 @@ import {
   extractEmbeddedArticleContentFromRawJson,
   fetchFirstArticleContent,
 } from '@/lib/article-extractor'
+import { prepareMediaItemsForImport } from '@/lib/media-downloader'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -260,7 +261,7 @@ export async function importTweets(
         continue
       }
 
-      const media = extractMedia(tweet)
+      const media = await prepareMediaItemsForImport(extractMedia(tweet), { tweetId: tweet.rest_id })
       const userLegacy = tweet.core?.user_results?.result?.legacy ?? {}
 
       const rawDate = tweet.legacy?.created_at
@@ -295,6 +296,7 @@ export async function importTweets(
             type: m.type,
             url: m.url,
             thumbnailUrl: m.thumbnailUrl ?? null,
+            localPath: m.localPath,
           })),
         })
       }

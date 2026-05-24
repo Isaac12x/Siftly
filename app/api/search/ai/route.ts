@@ -224,7 +224,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const selectShape = {
     id: true, tweetId: true, text: true, articleUrl: true, articleContent: true, authorHandle: true, authorName: true,
     tweetCreatedAt: true, importedAt: true, semanticTags: true, entities: true,
-    mediaItems: { select: { id: true, type: true, url: true, thumbnailUrl: true, imageTags: true } },
+    mediaItems: { select: { id: true, type: true, url: true, thumbnailUrl: true, localPath: true, imageTags: true } },
     categories: {
       include: { category: { select: { id: true, name: true, slug: true, color: true } } },
       orderBy: { confidence: 'desc' as const },
@@ -416,7 +416,7 @@ Constraints:
         tweetCreatedAt: b.tweetCreatedAt?.toISOString() ?? null,
         importedAt: b.importedAt.toISOString(),
         mediaItems: b.mediaItems.map((m) => ({
-          id: m.id, type: m.type, url: m.url, thumbnailUrl: m.thumbnailUrl, imageTags: m.imageTags ?? null,
+          id: m.id, type: m.type, url: m.url, thumbnailUrl: m.thumbnailUrl, localPath: m.localPath, imageTags: m.imageTags ?? null,
         })),
         categories: b.categories.map((bc) => ({
           id: bc.category.id, name: bc.category.name, slug: bc.category.slug,

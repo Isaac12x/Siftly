@@ -6,6 +6,7 @@ import {
   extractEmbeddedArticleContentFromRawJson,
   fetchFirstArticleContent,
 } from '@/lib/article-extractor'
+import { prepareMediaItemsForImport } from '@/lib/media-downloader'
 
 const BEARER = 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I%2BxMb1nYFAA%3DUognEfK4ZPxYowpr4nMskopkC%2FDO'
 
@@ -290,7 +291,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           continue
         }
 
-        const media = extractMedia(tweet)
+        const media = await prepareMediaItemsForImport(extractMedia(tweet), { tweetId: tweet.rest_id })
         const userLegacy = tweet.core?.user_results?.result?.legacy ?? {}
 
         const rawJson = JSON.stringify(tweet)
@@ -321,6 +322,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
               type: m.type,
               url: m.url,
               thumbnailUrl: m.thumbnailUrl ?? null,
+              localPath: m.localPath,
             })),
           })
         }

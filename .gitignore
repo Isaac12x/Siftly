@@ -46,6 +46,9 @@ next-env.d.ts
 # generated prisma client
 /app/generated/prisma
 
+# Imported media cache (private bookmark assets)
+/public/media-cache/
+
 # Database files — never commit these (contain your private bookmarks)
 prisma/dev.db
 prisma/dev.db-journal

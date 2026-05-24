@@ -6,6 +6,7 @@ import {
   extractEmbeddedArticleContentFromRawJson,
   fetchFirstArticleContent,
 } from '@/lib/article-extractor'
+import { prepareMediaItemsForImport } from '@/lib/media-downloader'
 
 const ALLOWED_ORIGINS = new Set(['https://x.com', 'https://twitter.com'])
 
@@ -149,7 +150,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 
     const userLegacy = tweet.core?.user_results?.result?.legacy ?? {}
-    const media = extractMedia(tweet)
+    const media = await prepareMediaItemsForImport(extractMedia(tweet), { tweetId: tweet.rest_id })
 
     const rawJson = JSON.stringify(tweet)
     const articleUrls = extractArticleUrlsFromRawJson(rawJson)
@@ -179,6 +180,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           type: m.type,
           url: m.url,
           thumbnailUrl: m.thumbnailUrl ?? null,
+          localPath: m.localPath,
         })),
       })
     }

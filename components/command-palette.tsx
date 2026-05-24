@@ -3,12 +3,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { Search, X, ArrowRight, Loader2 } from 'lucide-react'
-import type { BookmarkWithMedia } from '@/lib/types'
 import { buildMediaCandidates } from '@/lib/media'
-
-interface SearchResult extends BookmarkWithMedia {
-  total?: number
-}
+import type { BookmarkWithMedia } from '@/lib/types'
 
 function ThumbnailImage({ src }: { src: string }) {
   return <ThumbnailImageInner key={src} src={src} />
@@ -171,7 +167,10 @@ export default function CommandPalette() {
           {results.length > 0 && (
             <ul className="max-h-96 overflow-y-auto py-2">
               {results.map((b, i) => {
-                const thumb = b.mediaItems[0]?.thumbnailUrl ?? (b.mediaItems[0]?.type === 'photo' ? b.mediaItems[0]?.url : null)
+                const firstMedia = b.mediaItems[0] ?? null
+                const thumb = firstMedia?.type === 'photo'
+                  ? (firstMedia.localPath ?? firstMedia.thumbnailUrl ?? firstMedia.url)
+                  : (firstMedia?.thumbnailUrl ?? null)
                 const isSelected = i === selected
                 return (
                   <li key={b.id}>

@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { Image, Play } from 'lucide-react'
+import { Image as ImageIcon, Play } from 'lucide-react'
 import type { BookmarkWithMedia } from '@/lib/types'
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -85,9 +85,9 @@ function MiniAvatar({ name, handle }: { name: string; handle: string }) {
 
 function MediaIndicator({ item }: { item: BookmarkWithMedia['mediaItems'][number] }) {
   const isVideo = item.type === 'video' || isVideoUrl(item.url)
-  const thumb = item.thumbnailUrl && !isVideoUrl(item.thumbnailUrl)
-    ? item.thumbnailUrl
-    : (!isVideoUrl(item.url) ? item.url : null)
+  const thumb = item.type === 'photo'
+    ? (item.localPath ?? item.thumbnailUrl ?? item.url)
+    : (item.thumbnailUrl && !isVideoUrl(item.thumbnailUrl) ? item.thumbnailUrl : null)
 
   if (thumb) {
     return (
@@ -113,7 +113,7 @@ function MediaIndicator({ item }: { item: BookmarkWithMedia['mediaItems'][number
     <div className="shrink-0 w-8 h-8 rounded flex items-center justify-center border border-zinc-700/50 bg-zinc-800/60">
       {isVideo
         ? <Play size={10} className="text-zinc-500" />
-        : <Image size={10} className="text-zinc-500" />
+        : <ImageIcon size={10} className="text-zinc-500" />
       }
     </div>
   )

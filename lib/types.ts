@@ -5,6 +5,7 @@ export interface MediaItem {
   type: string
   url: string
   thumbnailUrl: string | null
+  localPath?: string | null
   imageTags?: string | null
 }
 

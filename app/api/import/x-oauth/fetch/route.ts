@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
 import { buildArticleImportFields, fetchFirstArticleContent } from '@/lib/article-extractor'
+import { prepareMediaItemsForImport } from '@/lib/media-downloader'
 
 const TWEET_FIELDS = 'created_at,author_id,text,entities,attachments'
 const EXPANSIONS = 'author_id,attachments.media_keys'
@@ -315,7 +316,7 @@ export async function POST(request: NextRequest) {
 
           // Import media
           const mediaKeys = tweet.attachments?.media_keys ?? []
-          const mediaItems: { bookmarkId: string; type: string; url: string; thumbnailUrl: string | null }[] = []
+          const mediaItems: { type: string; url: string; thumbnailUrl: string | null }[] = []
 
           for (const key of mediaKeys) {
             const m = mediaMap.get(key)
@@ -332,7 +333,6 @@ export async function POST(request: NextRequest) {
 
             if (url) {
               mediaItems.push({
-                bookmarkId: created.id,
                 type: m.type === 'animated_gif' ? 'gif' : m.type,
                 url,
                 thumbnailUrl,
@@ -341,7 +341,16 @@ export async function POST(request: NextRequest) {
           }
 
           if (mediaItems.length > 0) {
-            await prisma.mediaItem.createMany({ data: mediaItems })
+            const preparedMediaItems = await prepareMediaItemsForImport(mediaItems, { tweetId: tweet.id })
+            await prisma.mediaItem.createMany({
+              data: preparedMediaItems.map((item) => ({
+                bookmarkId: created.id,
+                type: item.type,
+                url: item.url,
+                thumbnailUrl: item.thumbnailUrl,
+                localPath: item.localPath,
+              })),
+            })
           }
 
           imported++

@@ -24,7 +24,7 @@ export async function GET(): Promise<NextResponse> {
         orderBy: { importedAt: 'desc' },
         include: {
           mediaItems: {
-            select: { id: true, type: true, url: true, thumbnailUrl: true },
+            select: { id: true, type: true, url: true, thumbnailUrl: true, localPath: true },
           },
           categories: {
             include: {

@@ -10,7 +10,7 @@ const RECENT_QUERY = {
   take: 6,
   orderBy: [{ tweetCreatedAt: 'desc' as const }, { importedAt: 'desc' as const }],
   include: {
-    mediaItems: { select: { id: true, type: true, url: true, thumbnailUrl: true } },
+    mediaItems: { select: { id: true, type: true, url: true, thumbnailUrl: true, localPath: true } },
     categories: {
       include: {
         category: { select: { id: true, name: true, slug: true, color: true } },

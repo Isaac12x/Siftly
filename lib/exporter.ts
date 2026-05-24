@@ -1,4 +1,6 @@
 import JSZip from 'jszip'
+import { readFile } from 'node:fs/promises'
+import path from 'node:path'
 import prisma from '@/lib/db'
 
 interface BookmarkRow {
@@ -62,6 +64,33 @@ async function downloadFile(url: string): Promise<Buffer | null> {
     if (!response.ok) return null
     const arrayBuffer = await response.arrayBuffer()
     return Buffer.from(arrayBuffer)
+  } catch {
+    return null
+  }
+}
+
+function normalizePublicBasePath(basePath: string): string {
+  return `/${basePath.trim().replace(/^\/+/, '').replace(/\/+$/, '') || 'media-cache'}`
+}
+
+function localMediaFilePath(localPath: string): string | null {
+  const publicBasePath = normalizePublicBasePath(process.env.SIFTLY_MEDIA_PUBLIC_BASE ?? '/media-cache')
+  if (!localPath.startsWith(`${publicBasePath}/`)) return null
+
+  const relativePath = localPath.slice(publicBasePath.length).replace(/^\/+/, '')
+  if (!relativePath || relativePath.includes('..')) return null
+
+  const storageDir = process.env.SIFTLY_MEDIA_CACHE_DIR?.trim() || path.join(process.cwd(), 'public', publicBasePath.slice(1))
+  return path.join(storageDir, relativePath)
+}
+
+async function readLocalMediaFile(localPath: string | null): Promise<Buffer | null> {
+  if (!localPath) return null
+  const filePath = localMediaFilePath(localPath)
+  if (!filePath) return null
+
+  try {
+    return await readFile(filePath)
   } catch {
     return null
   }
@@ -134,7 +163,7 @@ export async function exportCategoryAsZip(categorySlug: string): Promise<Buffer>
       const filename = urlToFilename(item.url, mediaIndex, ext)
       mediaIndex++
 
-      const fileData = await downloadFile(item.url)
+      const fileData = await readLocalMediaFile(item.localPath) ?? await downloadFile(item.url)
       if (fileData && mediaFolder) {
         mediaFolder.file(filename, fileData)
       }
@@ -209,6 +238,7 @@ export async function exportBookmarksJson(bookmarkIds?: string[]): Promise<strin
       type: m.type,
       url: m.url,
       thumbnailUrl: m.thumbnailUrl,
+      localPath: m.localPath,
     })),
   }))
 

@@ -9,6 +9,7 @@ import {
   extractEmbeddedArticleContentFromRawJson,
   fetchFirstArticleContent,
 } from '@/lib/article-extractor'
+import { prepareMediaItemsForImport, type PreparedMediaItemImport } from '@/lib/media-downloader'
 
 const IMPORT_PREPARE_CONCURRENCY = 6
 const IMPORT_PREPARE_CHUNK_SIZE = 100
@@ -16,6 +17,7 @@ const IMPORT_PREPARE_CHUNK_SIZE = 100
 interface PreparedBookmarkImport {
   bookmark: ParsedBookmark
   articleFields: ArticleImportFields
+  mediaItems: PreparedMediaItemImport[]
 }
 
 async function prepareBookmarkImport(bookmark: ParsedBookmark): Promise<PreparedBookmarkImport> {
@@ -33,6 +35,7 @@ async function prepareBookmarkImport(bookmark: ParsedBookmark): Promise<Prepared
   return {
     bookmark,
     articleFields: buildArticleImportFields(articleUrls, article),
+    mediaItems: await prepareMediaItemsForImport(bookmark.media, { tweetId: bookmark.tweetId }),
   }
 }
 
@@ -128,7 +131,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       (bookmark) => prepareBookmarkImport(bookmark),
     )
 
-    for (const { bookmark, articleFields } of preparedBookmarks) {
+    for (const { bookmark, articleFields, mediaItems } of preparedBookmarks) {
       try {
         await prisma.bookmark.create({
           data: {
@@ -140,13 +143,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             rawJson: bookmark.rawJson,
             ...articleFields,
             source,
-            ...(bookmark.media.length > 0
+            ...(mediaItems.length > 0
               ? {
                   mediaItems: {
-                    create: bookmark.media.map((m) => ({
+                    create: mediaItems.map((m) => ({
                       type: m.type,
                       url: m.url,
                       thumbnailUrl: m.thumbnailUrl ?? null,
+                      localPath: m.localPath,
                     })),
                   },
                 }
